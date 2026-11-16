@@ -1,0 +1,183 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "go2rtc",
+        "description": "Address of the go2rtc instance that serves the camera streams, and its API login if go2rtc asks for one.",
+        "data": {
+          "url": "go2rtc address"
+        },
+        "data_description": {
+          "url": "For example http://192.168.1.10:1984. Put a login in the section below, not in the address."
+        },
+        "sections": {
+          "api": {
+            "name": "go2rtc API login",
+            "description": "Fill in only if go2rtc asks for the login set by api.username and api.password. It asks unless it sees the request come from its own 127.0.0.1: the address above is 127.0.0.1 or localhost on the go2rtc machine itself, not a port published from a Docker container (-p 1984:1984), and local_auth: true is not set. A LAN address or a Docker host name counts as another machine, even when Home Assistant runs on the same one.",
+            "data": {
+              "username": "API username",
+              "password": "API password"
+            },
+            "data_description": {
+              "username": "api.username from the go2rtc configuration. Empty: no login.",
+              "password": "api.password from the go2rtc configuration. Leave it empty if go2rtc sets api.username without a password. After a form error the field comes back empty: left empty, it keeps the password typed before for the same username, unless go2rtc refused that login."
+            }
+          }
+        }
+      },
+      "stream": {
+        "title": "Camera",
+        "description": "Pick a stream and name the camera. A substream is better: every check decodes a frame with ffmpeg on the Home Assistant machine.",
+        "data": {
+          "stream": "Stream",
+          "name": "Name"
+        },
+        "data_description": {
+          "stream": "A stream from the go2rtc configuration.",
+          "name": "The name of the device and its entities in Home Assistant."
+        },
+        "sections": {
+          "rtsp": {
+            "name": "go2rtc RTSP server",
+            "description": "Fill in only if go2rtc in Docker publishes RTSP on another port or the go2rtc RTSP server asks for a login.",
+            "data": {
+              "port": "RTSP port",
+              "username": "RTSP username",
+              "password": "RTSP password"
+            },
+            "data_description": {
+              "port": "Empty: the port go2rtc listens on (rtsp.listen, usually 8554). Not the API port 1984.",
+              "username": "rtsp.username from the go2rtc configuration. Empty: no login.",
+              "password": "rtsp.password from the go2rtc configuration. After a form error the field comes back empty: left empty, it keeps the password typed before for the same username, unless the error was a failed trial check."
+            }
+          }
+        }
+      },
+      "reconfigure": {
+        "title": "go2rtc connection",
+        "description": "The settings are saved without a connection check. If go2rtc or its RTSP server is unreachable or the go2rtc API login or the RTSP login is wrong, the camera status becomes \"Check failed\".",
+        "data": {
+          "url": "go2rtc address"
+        },
+        "data_description": {
+          "url": "For example http://192.168.1.10:1984. Put a login in the section below, not in the address."
+        },
+        "sections": {
+          "api": {
+            "name": "go2rtc API login",
+            "description": "Fill in only if go2rtc asks for the login set by api.username and api.password. It asks unless it sees the request come from its own 127.0.0.1: the address above is 127.0.0.1 or localhost on the go2rtc machine itself, not a port published from a Docker container (-p 1984:1984), and local_auth: true is not set. A LAN address or a Docker host name counts as another machine, even when Home Assistant runs on the same one.",
+            "data": {
+              "username": "API username",
+              "password": "API password"
+            },
+            "data_description": {
+              "username": "api.username from the go2rtc configuration. Empty: no login.",
+              "password": "api.password from the go2rtc configuration. Passwords are not shown; leave the field empty to keep the saved one, or the one typed before a form error, while the username stays the same. A new username in place of a saved password needs its password; with no saved password, an empty field means no password (go2rtc sets api.username without one). To drop a saved password but keep the username, clear the username and submit, then open Reconfigure again and enter the username alone."
+            }
+          },
+          "rtsp": {
+            "name": "go2rtc RTSP server",
+            "description": "Fill in only if go2rtc in Docker publishes RTSP on another port or the go2rtc RTSP server asks for a login.",
+            "data": {
+              "port": "RTSP port",
+              "username": "RTSP username",
+              "password": "RTSP password"
+            },
+            "data_description": {
+              "port": "Empty: the port go2rtc listens on (rtsp.listen, usually 8554). Not the API port 1984.",
+              "username": "rtsp.username from the go2rtc configuration. Empty: no login.",
+              "password": "rtsp.password from the go2rtc configuration. Passwords are not shown; leave the field empty to keep the saved one, or the one typed before a form error, while the username stays the same. A new username needs its password."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "api_login": "A go2rtc API password needs its username, and a new username in place of a saved password needs its password: an empty field keeps the saved one only for the same username. The username cannot contain a colon.",
+      "cannot_connect": "No proper go2rtc reply at this address: it is unreachable or another service answers.",
+      "check_failed": "go2rtc answers, but the trial check failed: {reason}. Check that the go2rtc RTSP server is on and reachable from Home Assistant, that the RTSP port and login below are right, and that ffmpeg works. \"HTTP 401\" means the go2rtc API login of the previous step stopped working: start the setup again.",
+      "invalid_auth": "The go2rtc API refused the login: go2rtc asks for one and it is missing or wrong. Enter api.username and api.password from go2rtc.yaml in the \"go2rtc API login\" section.",
+      "invalid_url": "Enter an http or https address of go2rtc.",
+      "no_streams": "go2rtc has no streams configured.",
+      "rtsp_login": "Enter both the RTSP username and the password, or neither.",
+      "rtsp_login_long": "The RTSP username and password are too long: ffmpeg would cut them. Encoded as username:password they must fit in 127 characters, where most symbols take 3 characters each and a non-Latin or accented letter 6 or more. Use a shorter username or password.",
+      "stream_not_found": "go2rtc does not know this stream.",
+      "url_login": "Enter the address without a login; put the go2rtc API username and password in the \"go2rtc API login\" section below."
+    },
+    "abort": {
+      "already_configured": "This go2rtc stream is already added as a camera.",
+      "reconfigure_successful": "The settings have been updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Check settings",
+        "data": {
+          "scan_interval": "Check interval, seconds",
+          "frame_timeout": "Frame timeout, seconds",
+          "failures": "Failures in a row before \"disconnected\"",
+          "same_frames": "Identical frames in a row before \"frozen\""
+        },
+        "data_description": {
+          "scan_interval": "How often a frame is taken, from 15 to 3600.",
+          "frame_timeout": "How long one check may wait for a frame, from 5 to 60. Longer than this gives \"Frame timeout\".",
+          "failures": "Checks in a row without a valid frame (No stream, Bad frame, Frame timeout) before the connection sensor turns off, from 1 to 10. \"Check failed\" and \"Stream not found\" are not counted and do not reset the count.",
+          "same_frames": "From 2 to 100, or 0 to turn off the freeze check."
+        }
+      }
+    },
+    "error": {
+      "invalid_same_frames": "Enter 0 or a value from 2 to 100."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connectivity": {
+        "name": "Connection"
+      },
+      "frozen": {
+        "name": "Frozen"
+      }
+    },
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "frozen": "Frozen",
+          "no_stream": "No stream",
+          "bad_frame": "Bad frame",
+          "frame_timeout": "Frame timeout",
+          "stream_not_found": "Stream not found",
+          "probe_error": "Check failed",
+          "disabled": "Monitoring off"
+        }
+      },
+      "last_frame": {
+        "name": "Picture last changed"
+      },
+      "response_time": {
+        "name": "Response time"
+      }
+    },
+    "switch": {
+      "monitoring": {
+        "name": "Monitoring"
+      }
+    },
+    "button": {
+      "check_now": {
+        "name": "Check now"
+      }
+    }
+  },
+  "exceptions": {
+    "check_cancelled": {
+      "message": "The check was stopped because the camera entry was reloaded. Try again."
+    },
+    "monitoring_off": {
+      "message": "Monitoring is off. Turn it on to check the camera."
+    }
+  }
+}

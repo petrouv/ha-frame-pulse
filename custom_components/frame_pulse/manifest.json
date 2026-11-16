@@ -1,0 +1,14 @@
+{
+  "domain": "frame_pulse",
+  "name": "Frame Pulse",
+  "categories": ["security_safety.cameras", "computers_network.monitoring"],
+  "codeowners": ["@petrouv"],
+  "config_flow": true,
+  "dependencies": ["ffmpeg"],
+  "documentation": "https://github.com/petrouv/ha-frame-pulse",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/petrouv/ha-frame-pulse/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
