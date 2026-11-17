@@ -1,0 +1,33 @@
+{
+  "entity": {
+    "button": {
+      "check_now": {
+        "default": "mdi:camera-retake"
+      }
+    },
+    "sensor": {
+      "status": {
+        "default": "mdi:cctv",
+        "state": {
+          "ok": "mdi:check-circle",
+          "frozen": "mdi:snowflake",
+          "no_stream": "mdi:video-off",
+          "bad_frame": "mdi:image-broken-variant",
+          "frame_timeout": "mdi:timer-sand",
+          "stream_not_found": "mdi:help-circle",
+          "probe_error": "mdi:alert-circle",
+          "disabled": "mdi:pause-circle"
+        }
+      }
+    },
+    "switch": {
+      "monitoring": {
+        "default": "mdi:eye",
+        "state": {
+          "on": "mdi:eye",
+          "off": "mdi:eye-off"
+        }
+      }
+    }
+  }
+}

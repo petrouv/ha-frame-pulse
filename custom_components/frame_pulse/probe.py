@@ -103,12 +103,15 @@ class FrameResult:
         digest: SHA-256 of a valid frame.
         detail: Reason for the log, already free of addresses and of a secret-bearing stream name.
         duration_ms: How long ffmpeg ran, `None` if it did not start.
+        auth_failed: The go2rtc API refused its login (HTTP 401); the status is
+            then `probe_error`. A refused RTSP login does not set it.
     """
 
     status: Status
     digest: str | None = None
     detail: str = ""
     duration_ms: int | None = None
+    auth_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -515,16 +518,16 @@ def classify_grab(grab: Grab) -> Status:
 
 
 async def _resolve_not_found(
-    session: aiohttp.ClientSession, base_url: str, stream: str, detail: str, api: ApiAccess
+    session: aiohttp.ClientSession, base_url: str, stream: str, api: ApiAccess
 ) -> tuple[Status, str]:
     """Tell an unknown stream from a camera go2rtc cannot reach, both RTSP 404.
 
     The stream list is asked instead of the version: it answers both questions.
+
+    Raises:
+        Go2rtcError: The stream list could not be fetched.
     """
-    try:
-        streams = await list_streams(session, base_url, api=api)
-    except Go2rtcError as err:
-        return Status.PROBE_ERROR, _api_failed_after(err, detail)
+    streams = await list_streams(session, base_url, api=api)
     if stream in streams:
         return Status.NO_STREAM, "go2rtc cannot reach the camera (RTSP 404)"
     return Status.STREAM_NOT_FOUND, "go2rtc has no such stream (RTSP 404)"
@@ -554,12 +557,17 @@ async def probe_frame(
     shows up as `probe_error`, not as a dead camera. After a frame timeout the
     RTSP port is also tried, so a port that drops connections silently is
     `probe_error` too. Every API request carries the API login, `access` is
-    the RTSP one.
+    the RTSP one; when go2rtc refuses the API login, the result says so in
+    `auth_failed`.
     """
     try:
         info = await go2rtc_info(session, base_url, api=api)
     except Go2rtcError as err:
-        return FrameResult(Status.PROBE_ERROR, detail=f"go2rtc API failed: {err}")
+        return FrameResult(
+            Status.PROBE_ERROR,
+            detail=f"go2rtc API failed: {err}",
+            auth_failed=isinstance(err, Go2rtcAuthError),
+        )
     url = rtsp_url(base_url, info, stream, access)
     if url is None:
         return FrameResult(Status.PROBE_ERROR, detail="the go2rtc RTSP server is off")
@@ -584,20 +592,21 @@ async def probe_frame(
     else:
         detail = scrub(f"ffmpeg {grab.returncode}: {grab.error}", stream)
 
-    if status is Status.STREAM_NOT_FOUND:
-        status, detail = await _resolve_not_found(session, base_url, stream, detail, api)
-    elif status is not Status.PROBE_ERROR:
-        try:
+    auth_failed = False
+    try:
+        if status is Status.STREAM_NOT_FOUND:
+            status, detail = await _resolve_not_found(session, base_url, stream, api)
+        elif status is not Status.PROBE_ERROR:
             await go2rtc_info(session, base_url, api=api)
-        except Go2rtcError as err:
-            status, detail = Status.PROBE_ERROR, _api_failed_after(err, detail)
-        else:
             if status is Status.FRAME_TIMEOUT and (
                 problem := await rtsp_port_problem(url, API_TIMEOUT)
             ):
                 detail = cut(f"the go2rtc RTSP port does not answer: {problem} (after {detail})")
                 status = Status.PROBE_ERROR
-    return FrameResult(status, detail=detail, duration_ms=duration_ms)
+    except Go2rtcError as err:
+        status, detail = Status.PROBE_ERROR, _api_failed_after(err, detail)
+        auth_failed = isinstance(err, Go2rtcAuthError)
+    return FrameResult(status, detail=detail, duration_ms=duration_ms, auth_failed=auth_failed)
 
 
 def apply_result(

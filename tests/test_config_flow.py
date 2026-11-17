@@ -19,6 +19,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.frame_pulse import config_flow
 from custom_components.frame_pulse.config_flow import _clean_url
 from custom_components.frame_pulse.const import (
     CONF_API,
@@ -36,8 +37,9 @@ from custom_components.frame_pulse.const import (
     DEFAULT_SAME_FRAMES,
     DEFAULT_URL,
     DOMAIN,
+    MAX_CONCURRENT_PROBES,
 )
-from custom_components.frame_pulse.coordinator import entry_unique_id
+from custom_components.frame_pulse.coordinator import entry_unique_id, probe_semaphore
 from custom_components.frame_pulse.probe import MAX_STREAMS_BYTES, Grab
 
 from .conftest import API_INFO, API_URL, NOT_FOUND, SECRET_URL, STREAM, STREAMS_URL, URL
@@ -115,6 +117,9 @@ async def test_create_with_working_frame(hass, aioclient_mock):
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Driveway"
     assert result["data"] == {CONF_URL: URL, CONF_STREAM: STREAM}
+    # A new entry is of the current format and needs no migration.
+    assert (result["version"], result["minor_version"]) == (1, 2)
+    assert result["result"].minor_version == 2
 
 
 async def test_failed_frame_does_not_block_saving(hass, aioclient_mock, ffmpeg):
@@ -485,7 +490,7 @@ async def test_reconfigure_onto_own_address_succeeds(hass, entry, aioclient_mock
 
 async def test_reconfigure_keeps_planned_shutdown_and_entities(hass, entry, aioclient_mock):
     go2rtc(aioclient_mock)
-    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_MONITORING: False})
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MONITORING: False})
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     registry = er.async_get(hass)
@@ -499,7 +504,8 @@ async def test_reconfigure_keeps_planned_shutdown_and_entities(hass, entry, aioc
     await hass.async_block_till_done(wait_background_tasks=True)
 
     assert result["reason"] == "reconfigure_successful"
-    assert entry.data == {CONF_URL: other, CONF_STREAM: STREAM, CONF_MONITORING: False}
+    assert entry.data == {CONF_URL: other, CONF_STREAM: STREAM}
+    assert entry.options[CONF_MONITORING] is False
     assert entry.runtime_data.data.status == "disabled"
     after = {e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)}
     assert after == before
@@ -602,11 +608,12 @@ def login_entry(hass) -> MockConfigEntry:
         data={
             CONF_URL: URL,
             CONF_STREAM: STREAM,
-            CONF_MONITORING: False,
             CONF_RTSP_PORT: 18554,
             CONF_RTSP_USERNAME: "viewer",
             CONF_RTSP_PASSWORD: "hunter2",
         },
+        options={CONF_MONITORING: False},
+        minor_version=2,
     )
     config_entry.add_to_hass(hass)
     return config_entry
@@ -650,7 +657,6 @@ async def test_reconfigure_saves_rtsp_settings(hass, login_entry, aioclient_mock
     assert login_entry.data == {
         CONF_URL: URL,
         CONF_STREAM: STREAM,
-        CONF_MONITORING: False,
         **expected,
     }
 
@@ -975,13 +981,14 @@ def full_entry(hass) -> MockConfigEntry:
         data={
             CONF_URL: URL,
             CONF_STREAM: STREAM,
-            CONF_MONITORING: False,
             CONF_API_USERNAME: "viewer",
             CONF_API_PASSWORD: "hunter2",
             CONF_RTSP_PORT: 18554,
             CONF_RTSP_USERNAME: "rtsp-user",
             CONF_RTSP_PASSWORD: "rtsp-pw",
         },
+        options={CONF_MONITORING: False},
+        minor_version=2,
     )
     config_entry.add_to_hass(hass)
     return config_entry
@@ -1030,7 +1037,6 @@ async def test_reconfigure_saves_the_api_login_and_keeps_rtsp(hass, full_entry, 
     assert full_entry.data == {
         CONF_URL: URL,
         CONF_STREAM: STREAM,
-        CONF_MONITORING: False,
         **expected,
         **RTSP_SAVED,
     }
@@ -1046,7 +1052,6 @@ async def test_reconfigure_rtsp_change_keeps_the_api_login(hass, full_entry):
     assert full_entry.data == {
         CONF_URL: URL,
         CONF_STREAM: STREAM,
-        CONF_MONITORING: False,
         CONF_API_USERNAME: "viewer",
         CONF_API_PASSWORD: "hunter2",
     }
@@ -1131,10 +1136,11 @@ def username_only_entry(hass) -> MockConfigEntry:
         data={
             CONF_URL: URL,
             CONF_STREAM: STREAM,
-            CONF_MONITORING: False,
             CONF_API_USERNAME: "admin",
             CONF_API_PASSWORD: "",
         },
+        options={CONF_MONITORING: False},
+        minor_version=2,
     )
     config_entry.add_to_hass(hass)
     return config_entry
@@ -1165,7 +1171,6 @@ async def test_reconfigure_username_only_api_login(
     assert username_only_entry.data == {
         CONF_URL: URL,
         CONF_STREAM: STREAM,
-        CONF_MONITORING: False,
         **expected,
     }
 
@@ -1463,3 +1468,234 @@ async def test_options_out_of_range_rejected(hass, entry, aioclient_mock):
             result["flow_id"],
             {CONF_SCAN_INTERVAL: 5, CONF_FRAME_TIMEOUT: 20, CONF_FAILURES: 2, CONF_SAME_FRAMES: 5},
         )
+
+
+async def test_options_save_keeps_the_monitoring_flag(hass, entry, aioclient_mock):
+    """The switch keeps its flag in the options, which the options form replaces as a whole."""
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MONITORING: False})
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_SCAN_INTERVAL: 90, CONF_FRAME_TIMEOUT: 15, CONF_FAILURES: 4, CONF_SAME_FRAMES: 0},
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entry.options == {
+        CONF_SCAN_INTERVAL: 90,
+        CONF_FRAME_TIMEOUT: 15,
+        CONF_FAILURES: 4,
+        CONF_SAME_FRAMES: 0,
+        CONF_MONITORING: False,
+    }
+    assert entry.runtime_data.data.status == "disabled"
+    assert aioclient_mock.call_count == 0
+
+
+async def test_reconfigure_keeps_the_monitoring_flag_in_the_options(hass, entry, aioclient_mock):
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MONITORING: False})
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_URL: "http://other.test:1984", CONF_API: {}, CONF_RTSP: {}}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.options[CONF_MONITORING] is False
+    assert entry.runtime_data.data.status == "disabled"
+
+
+async def test_trial_check_reports_busy_checks(hass, aioclient_mock, ffmpeg, monkeypatch):
+    """Both check slots stay taken by cameras: the form says so instead of spinning."""
+    monkeypatch.setattr(config_flow, "SLOT_WAIT", 0.01)
+    result = await to_stream_step(hass, aioclient_mock)
+    semaphore = probe_semaphore(hass)
+    for _ in range(MAX_CONCURRENT_PROBES):
+        await semaphore.acquire()
+    user_input = {CONF_STREAM: STREAM, CONF_NAME: "Driveway", CONF_RTSP: {}}
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
+    assert result["errors"] == {"base": "checks_busy"}
+    assert result["description_placeholders"] == {"seconds": "0.01"}
+    assert ffmpeg.urls == []
+
+    for _ in range(MAX_CONCURRENT_PROBES):
+        semaphore.release()
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # The trial check gave its slot back.
+    assert not semaphore.locked()
+
+
+async def test_trial_check_takes_a_slot_freed_in_time(hass, aioclient_mock, ffmpeg):
+    result = await to_stream_step(hass, aioclient_mock)
+    semaphore = probe_semaphore(hass)
+    for _ in range(MAX_CONCURRENT_PROBES):
+        await semaphore.acquire()
+    hass.loop.call_later(0.01, semaphore.release)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_STREAM: STREAM, CONF_NAME: "Driveway", CONF_RTSP: {}}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    semaphore.release()
+
+
+async def test_reauth_form_shows_the_saved_username_without_the_password(hass, full_entry):
+    result = await full_entry.start_reauth_flow(hass)
+    assert result["step_id"] == "reauth_confirm"
+    assert result["description_placeholders"] == {"name": "Gate"}
+    assert suggestions(result["data_schema"]) == {CONF_USERNAME: "viewer", CONF_PASSWORD: None}
+    assert browser_data(result["data_schema"]) == {CONF_USERNAME: "viewer"}
+    assert "hunter2" not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("api", "expected", "header"),
+    [
+        (
+            {CONF_USERNAME: "viewer", CONF_PASSWORD: "new-pw"},
+            {CONF_API_USERNAME: "viewer", CONF_API_PASSWORD: "new-pw"},
+            {"Authorization": "Basic dmlld2VyOm5ldy1wdw=="},
+        ),
+        # go2rtc switched to `api.username` alone: the refused saved password is not reused.
+        (
+            {CONF_USERNAME: "viewer"},
+            {CONF_API_USERNAME: "viewer", CONF_API_PASSWORD: ""},
+            {"Authorization": "Basic dmlld2VyOg=="},
+        ),
+        (
+            {CONF_USERNAME: "other"},
+            {CONF_API_USERNAME: "other", CONF_API_PASSWORD: ""},
+            {"Authorization": "Basic b3RoZXI6"},
+        ),
+        ({}, {}, {}),
+    ],
+    ids=["new-password", "same-username-alone", "new-username-alone", "drop-login"],
+)
+async def test_reauth_saves_a_working_login_and_keeps_the_rest(
+    hass, full_entry, aioclient_mock, api, expected, header
+):
+    go2rtc(aioclient_mock)
+    result = await full_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], api)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert full_entry.data == {
+        CONF_URL: URL,
+        CONF_STREAM: STREAM,
+        **RTSP_SAVED,
+        **expected,
+    }
+    assert [call[1].path for call in aioclient_mock.mock_calls] == ["/api/streams"]
+    assert sent_headers(aioclient_mock) == [header]
+    assert full_entry.runtime_data.data.status == "disabled"
+
+
+@pytest.mark.parametrize(
+    ("api", "expected"),
+    [
+        ({CONF_USERNAME: "admin"}, {CONF_API_USERNAME: "admin", CONF_API_PASSWORD: ""}),
+        ({CONF_USERNAME: "viewer"}, {CONF_API_USERNAME: "viewer", CONF_API_PASSWORD: ""}),
+    ],
+    ids=["same-username", "new-username"],
+)
+async def test_reauth_username_only_api_login(
+    hass, username_only_entry, aioclient_mock, api, expected
+):
+    """go2rtc set up with `api.username` alone takes the username with an empty password."""
+    go2rtc(aioclient_mock)
+    result = await username_only_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], api)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert result["reason"] == "reauth_successful"
+    assert username_only_entry.data == {
+        CONF_URL: URL,
+        CONF_STREAM: STREAM,
+        **expected,
+    }
+
+
+async def test_reauth_refused_login_can_be_corrected(hass, full_entry, aioclient_mock):
+    aioclient_mock.get(STREAMS_URL, status=401)
+    result = await full_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "viewer", CONF_PASSWORD: "typed-pw"}
+    )
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert browser_data(result["data_schema"]) == {CONF_USERNAME: "viewer"}
+    assert "typed-pw" not in str(result)
+    assert "hunter2" not in str(result)
+    assert full_entry.data[CONF_API_PASSWORD] == "hunter2"
+
+    go2rtc(aioclient_mock)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], API_LOGIN)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert result["reason"] == "reauth_successful"
+
+
+async def test_reauth_refused_password_is_not_kept(hass, full_entry, aioclient_mock):
+    """After a refusal an empty password means none: neither the refused nor the saved one."""
+    aioclient_mock.get(STREAMS_URL, status=401)
+    result = await full_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "viewer", CONF_PASSWORD: "typed-pw"}
+    )
+    assert result["errors"] == {"base": "invalid_auth"}
+
+    go2rtc(aioclient_mock)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "viewer"}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert result["reason"] == "reauth_successful"
+    assert full_entry.data[CONF_API_PASSWORD] == ""
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ({"exc": aiohttp.ClientConnectionError()}, "reauth_cannot_connect"),
+        ({"status": 500}, "reauth_cannot_connect"),
+    ],
+    ids=["unreachable", "server-error"],
+)
+async def test_reauth_go2rtc_unreachable(hass, full_entry, aioclient_mock, reply, error):
+    """The password typed before the error is kept for an empty field with the same username."""
+    aioclient_mock.get(STREAMS_URL, **reply)
+    result = await full_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "viewer", CONF_PASSWORD: "typed-pw"}
+    )
+    assert result["errors"] == {"base": error}
+    assert "typed-pw" not in str(result)
+    assert full_entry.data[CONF_API_PASSWORD] == "hunter2"
+
+    go2rtc(aioclient_mock)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "viewer"}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert result["reason"] == "reauth_successful"
+    assert full_entry.data[CONF_API_PASSWORD] == "typed-pw"
+
+
+@pytest.mark.parametrize(
+    "api",
+    [
+        {CONF_PASSWORD: "typed-pw"},
+        {CONF_USERNAME: "vi:ewer", CONF_PASSWORD: "typed-pw"},
+    ],
+    ids=["password-only", "colon-in-username"],
+)
+async def test_reauth_bad_login_is_refused_without_a_request(hass, full_entry, aioclient_mock, api):
+    result = await full_entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], api)
+    assert result["errors"] == {"base": "reauth_api_login"}
+    assert aioclient_mock.call_count == 0
+    assert "typed-pw" not in str(result)

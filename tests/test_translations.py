@@ -111,3 +111,18 @@ def test_reconfigure_explains_how_to_drop_a_saved_api_password():
         step = json.loads((TRANSLATIONS / f"{language}.json").read_text())["config"]["step"]
         hint = step["reconfigure"]["sections"]["api"]["data_description"]["password"]
         assert phrase in hint, language
+
+
+def test_icons_match_the_translated_entities_and_states():
+    """Every icon belongs to a translated entity, and the status sensor has one per state."""
+    icons = json.loads((TRANSLATIONS.parent / "icons.json").read_text())["entity"]
+    entities = json.loads((TRANSLATIONS / "en.json").read_text())["entity"]
+    for platform, keys in icons.items():
+        for key, icon in keys.items():
+            assert key in entities[platform], (platform, key)
+            assert icon["default"].startswith("mdi:"), (platform, key)
+            assert all(value.startswith("mdi:") for value in icon.get("state", {}).values())
+    status = icons["sensor"]["status"]["state"]
+    assert set(status) == set(entities["sensor"]["status"]["state"])
+    assert set(icons["switch"]["monitoring"]["state"]) == {"on", "off"}
+    assert "check_now" in icons["button"]

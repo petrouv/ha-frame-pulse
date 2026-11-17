@@ -8,9 +8,11 @@ from datetime import UTC, datetime, timedelta
 
 import aiohttp
 import pytest
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import (
+    CONF_PASSWORD,
     CONF_URL,
+    CONF_USERNAME,
     EVENT_HOMEASSISTANT_STARTED,
     STATE_OFF,
     STATE_ON,
@@ -18,10 +20,11 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     EntityCategory,
 )
-from homeassistant.core import CoreState, State
+from homeassistant.core import CoreState, State, is_callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -29,9 +32,11 @@ from pytest_homeassistant_custom_component.common import (
     mock_restore_cache_with_extra_data,
 )
 
+from custom_components.frame_pulse import async_migrate_entry
 from custom_components.frame_pulse.const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
+    CONF_FAILURES,
     CONF_MONITORING,
     CONF_RTSP_PASSWORD,
     CONF_RTSP_PORT,
@@ -192,7 +197,6 @@ async def test_status_table_with_live_go2rtc(hass, entry, camera, grab, streams,
     [
         {"exc": aiohttp.ClientConnectionError()},
         {"exc": TimeoutError()},
-        {"status": 401},
         {"status": 404},
         {"text": "<html>not go2rtc</html>"},
         {"json": {"version": "1.9.9", "rtsp": {"listen": ""}}},
@@ -538,7 +542,7 @@ async def test_kept_state_of_wrong_type_is_ignored(hass, entry, camera, saved):
 
 async def test_kept_state_ignored_while_monitoring_is_off(hass, entry, camera):
     restore_binary_sensors(hass, entry, connected=False, failures=2)
-    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_MONITORING: False})
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MONITORING: False})
     await setup(hass, entry)
     assert entry.runtime_data.data.connected is None
     assert state(hass, entry, "connectivity") == STATE_UNAVAILABLE
@@ -980,17 +984,44 @@ async def test_entry_without_an_api_login_sends_none(hass, entry, camera):
     assert all("Authorization" not in headers for headers in sent_headers(camera))
 
 
-async def test_refused_api_login_is_probe_error_without_the_login(hass, api_entry, camera, caplog):
+def take_auth_error_log(caplog) -> str:
+    """Return and drop the error line Home Assistant logs when a check raises an auth failure.
+
+    The line is expected here, so it must not fail the test through `no_unexpected_errors`.
+    """
+    (record,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    caplog.records[:] = [r for r in caplog.records if r is not record]
+    return record.getMessage()
+
+
+def reauth_flows(hass, entry) -> list:
+    return list(entry.async_get_active_flows(hass, {SOURCE_REAUTH}))
+
+
+async def test_refused_api_login_asks_for_reauth(hass, api_entry, camera, caplog):
+    """A 401 from the go2rtc API stops polling and starts reauthentication."""
     caplog.set_level(logging.DEBUG, logger="custom_components.frame_pulse")
     camera.go2rtc(status=401)
     await setup(hass, api_entry)
 
-    assert state(hass, api_entry, "status") == "probe_error"
     assert camera.frame_requests == 0
-    assert (
-        "Gate: status probe_error, connected None "
-        "(go2rtc API failed: HTTP 401: the API login is missing or wrong)"
-    ) in caplog.text
+    assert not api_entry.runtime_data.last_update_success
+    for key in ("status", "connectivity", "frozen", "check_now"):
+        assert state(hass, api_entry, key) == STATE_UNAVAILABLE, key
+    # A planned shutdown can still be marked.
+    assert state(hass, api_entry, "monitoring") == STATE_ON
+    assert len(reauth_flows(hass, api_entry)) == 1
+    message = take_auth_error_log(caplog)
+    assert message.endswith(
+        "go2rtc refused the API login. Enter the current login when Home Assistant "
+        "asks for it in Settings > Devices & services"
+    )
+    # No poll is planned until the login is fixed.
+    requests = camera.mock.call_count
+    async_fire_time_changed(hass, dt_util.utcnow() + INTERVAL * 3)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert camera.mock.call_count == requests
+
     diagnostics = await async_get_config_entry_diagnostics(hass, api_entry)
     assert diagnostics["entry"][CONF_API_USERNAME] == "**REDACTED**"
     assert diagnostics["entry"][CONF_API_PASSWORD] == "**REDACTED**"
@@ -1000,6 +1031,211 @@ async def test_refused_api_login_is_probe_error_without_the_login(hass, api_entr
         assert secret not in api_entry.unique_id
     (device,) = dr.async_entries_for_config_entry(dr.async_get(hass), api_entry.entry_id)
     assert "api-user" not in f"{device.name} {device.model}"
+
+
+async def test_reauth_with_the_new_login_resumes_checks(hass, api_entry, camera, caplog):
+    camera.go2rtc(status=401)
+    await setup(hass, api_entry)
+    take_auth_error_log(caplog)
+    (flow,) = reauth_flows(hass, api_entry)
+
+    camera.frame(jpeg())
+    result = await hass.config_entries.flow.async_configure(
+        flow["flow_id"], {CONF_USERNAME: "api-user", CONF_PASSWORD: "new-s3cr3t"}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert result["reason"] == "reauth_successful"
+    assert api_entry.data[CONF_API_PASSWORD] == "new-s3cr3t"
+    # The reloaded entry sends the new login: base64 of "api-user:new-s3cr3t".
+    assert sent_headers(camera)[-1] == {"Authorization": "Basic YXBpLXVzZXI6bmV3LXMzY3IzdA=="}
+    assert api_entry.runtime_data.last_update_success
+    assert state(hass, api_entry, "status") == "ok"
+    assert not reauth_flows(hass, api_entry)
+
+
+async def test_api_login_refused_after_a_failed_frame_asks_for_reauth(
+    hass, api_entry, camera, caplog
+):
+    """The re-check of go2rtc after a failed frame meets a 401."""
+    camera.frame(jpeg())
+    await setup(hass, api_entry)
+    camera.frame(b"")
+
+    async def login_changes() -> None:
+        camera.mock.clear_requests()
+        camera.mock.get(API_URL, status=401)
+
+    camera.ffmpeg.hook = login_changes
+    await tick(hass, api_entry)
+
+    take_auth_error_log(caplog)
+    assert state(hass, api_entry, "status") == STATE_UNAVAILABLE
+    assert len(reauth_flows(hass, api_entry)) == 1
+
+
+async def test_check_now_reports_a_refused_api_login(hass, api_entry, camera, caplog):
+    camera.frame(jpeg())
+    await setup(hass, api_entry)
+    camera.go2rtc(status=401)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(
+            "button", "press", {"entity_id": ids(hass, api_entry)["check_now"]}, blocking=True
+        )
+    assert not isinstance(err.value, ServiceValidationError)
+    assert err.value.translation_key == "api_auth_failed"
+    take_auth_error_log(caplog)
+    assert len(reauth_flows(hass, api_entry)) == 1
+
+
+async def test_check_now_after_a_refused_login_is_fixed_in_go2rtc(hass, api_entry, camera, caplog):
+    """go2rtc takes the saved login again: polling resumes and Check now raises no stale error.
+
+    While the login is refused, Check now is unavailable like every entity of the
+    camera but the Monitoring switch, so one way back without the reauthentication
+    form is `homeassistant.update_entity`. Home Assistant keeps the last exception after
+    that success, which a later press must not report again.
+    """
+    assert await async_setup_component(hass, "homeassistant", {})
+    camera.go2rtc(status=401)
+    await setup(hass, api_entry)
+    take_auth_error_log(caplog)
+
+    camera.frame(jpeg())
+    status = ids(hass, api_entry)["status"]
+    await hass.services.async_call(
+        "homeassistant", "update_entity", {"entity_id": status}, blocking=True
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, api_entry, "status") == "ok"
+    before = camera.frame_requests
+    async_fire_time_changed(hass, dt_util.utcnow() + INTERVAL)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert camera.frame_requests == before + 1
+
+    await hass.services.async_call(
+        "button", "press", {"entity_id": ids(hass, api_entry)["check_now"]}, blocking=True
+    )
+    assert camera.frame_requests == before + 2
+    assert state(hass, api_entry, "status") == "ok"
+
+
+async def test_monitoring_switch_works_while_reauth_is_pending(hass, api_entry, camera, caplog):
+    """Off marks a planned shutdown; on runs one check, and the login request is not repeated.
+
+    After go2rtc takes the saved login again, turning on resumes polling.
+    """
+    camera.go2rtc(status=401)
+    await setup(hass, api_entry)
+    take_auth_error_log(caplog)
+    coordinator = api_entry.runtime_data
+    switch = ids(hass, api_entry)["monitoring"]
+
+    requests = camera.mock.call_count
+    await hass.services.async_call("switch", "turn_off", {"entity_id": switch}, blocking=True)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, api_entry, "monitoring") == STATE_OFF
+    assert state(hass, api_entry, "status") == "disabled"
+    assert api_entry.options[CONF_MONITORING] is False
+    assert len(reauth_flows(hass, api_entry)) == 1
+    # Turning off plans polling again; those polls send no request.
+    caplog.set_level(logging.DEBUG, logger="custom_components.frame_pulse")
+    polls = caplog.text.count("(monitoring is off)")
+    async_fire_time_changed(hass, dt_util.utcnow() + INTERVAL * 3)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert caplog.text.count("(monitoring is off)") == polls + 1
+    assert coordinator.last_update_success
+    assert camera.mock.call_count == requests
+
+    await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert camera.mock.call_count == requests + 1
+    assert camera.frame_requests == 0
+    take_auth_error_log(caplog)
+    assert coordinator.auth_failed
+    assert state(hass, api_entry, "monitoring") == STATE_ON
+    assert state(hass, api_entry, "status") == STATE_UNAVAILABLE
+    assert state(hass, api_entry, "check_now") == STATE_UNAVAILABLE
+    assert len(reauth_flows(hass, api_entry)) == 1
+    # The refused check plans no poll.
+    async_fire_time_changed(hass, dt_util.utcnow() + INTERVAL * 6)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert camera.mock.call_count == requests + 1
+
+    camera.frame(jpeg())
+    await hass.services.async_call("switch", "turn_off", {"entity_id": switch}, blocking=True)
+    await hass.services.async_call("switch", "turn_on", {"entity_id": switch}, blocking=True)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert state(hass, api_entry, "status") == "ok"
+    assert not coordinator.auth_failed
+    assert camera.frame_requests == 1
+    async_fire_time_changed(hass, dt_util.utcnow() + INTERVAL * 7)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert camera.frame_requests == 2
+
+
+async def test_monitoring_switch_is_unavailable_after_other_failures(hass, entry, camera, caplog):
+    """Only a refused login keeps the switch available; polling goes on after other failures."""
+    camera.frame(jpeg())
+    await setup(hass, entry)
+
+    async def broken() -> None:
+        raise RuntimeError("bug")
+
+    camera.ffmpeg.hook = broken
+    await tick(hass, entry)
+
+    (record,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert record.getMessage().startswith("Unexpected error fetching")
+    caplog.records[:] = [r for r in caplog.records if r is not record]
+    assert not entry.runtime_data.auth_failed
+    assert state(hass, entry, "monitoring") == STATE_UNAVAILABLE
+    assert state(hass, entry, "status") == STATE_UNAVAILABLE
+
+
+async def test_monitoring_switch_follows_a_failure_of_the_other_kind(
+    hass, api_entry, camera, caplog
+):
+    """Home Assistant skips the entity update after a failure that follows a failure.
+
+    The switch still turns available after a refused login that follows another
+    failure, and unavailable after another failure that follows a refused login.
+    """
+    assert await async_setup_component(hass, "homeassistant", {})
+    camera.frame(jpeg())
+    await setup(hass, api_entry)
+
+    async def broken() -> None:
+        raise RuntimeError("bug")
+
+    camera.ffmpeg.hook = broken
+    await tick(hass, api_entry)
+    (record,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert record.getMessage().startswith("Unexpected error fetching")
+    caplog.records[:] = [r for r in caplog.records if r is not record]
+    assert state(hass, api_entry, "monitoring") == STATE_UNAVAILABLE
+
+    camera.go2rtc(status=401)
+    await tick(hass, api_entry)
+    assert api_entry.runtime_data.auth_failed
+    assert len(reauth_flows(hass, api_entry)) == 1
+    assert state(hass, api_entry, "monitoring") == STATE_ON
+    assert state(hass, api_entry, "status") == STATE_UNAVAILABLE
+
+    camera.go2rtc()
+    await hass.services.async_call(
+        "homeassistant",
+        "update_entity",
+        {"entity_id": ids(hass, api_entry)["status"]},
+        blocking=True,
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    (record,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert record.getMessage().startswith("Unexpected error fetching")
+    caplog.records[:] = [r for r in caplog.records if r is not record]
+    assert not api_entry.runtime_data.auth_failed
+    assert state(hass, api_entry, "monitoring") == STATE_UNAVAILABLE
 
 
 class Gate:
@@ -1036,6 +1272,51 @@ async def test_cancelled_check_now_keeps_entities_available(hass, entry, camera)
     assert entry.runtime_data.last_update_success
     assert state(hass, entry, "status") == "ok"
     assert state(hass, entry, "connectivity") == STATE_ON
+
+
+async def test_presses_during_a_press_check_share_it(hass, entry, camera):
+    """Repeated presses join the running check instead of queuing one check each."""
+    camera.frame(jpeg())
+    await setup(hass, entry)
+    coordinator = entry.runtime_data
+    gate = Gate()
+    camera.ffmpeg.hook = gate
+    before = camera.frame_requests
+
+    presses = [hass.async_create_task(coordinator.async_check_now()) for _ in range(3)]
+    await gate.started.wait()
+    gate.release.set()
+    await asyncio.gather(*presses)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert camera.frame_requests == before + 1
+
+    # Once that check is over, a press starts a new one.
+    await coordinator.async_check_now()
+    assert camera.frame_requests == before + 2
+
+
+async def test_press_after_off_and_on_does_not_join_the_stale_check(hass, entry, camera):
+    """The check of an earlier press is thrown away after the switch, so a new press checks."""
+    camera.frame(jpeg())
+    await setup(hass, entry)
+    coordinator = entry.runtime_data
+    gate = Gate()
+    camera.ffmpeg.hook = gate
+    before = camera.frame_requests
+
+    stale = hass.async_create_task(coordinator.async_check_now())
+    await gate.started.wait()
+    coordinator.async_set_monitoring(False)
+    coordinator.async_set_monitoring(True)
+    fresh = hass.async_create_task(coordinator.async_check_now())
+    await asyncio.sleep(0)
+    gate.release.set()
+    await asyncio.gather(stale, fresh)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    # The stale press check, the check of turning on and the new press check.
+    assert camera.frame_requests == before + 3
+    assert state(hass, entry, "status") == "ok"
 
 
 async def test_check_now_after_off_and_on_while_waiting_ends_quietly(hass, entry, camera):
@@ -1149,6 +1430,133 @@ async def test_turning_on_returns_at_once_with_unknown_state(hass, entry, camera
     gate.release.set()
     await hass.async_block_till_done(wait_background_tasks=True)
     assert state(hass, entry, "status") == "ok"
+
+
+def test_set_monitoring_is_marked_as_a_callback():
+    assert is_callback(FramePulseCoordinator.async_set_monitoring)
+
+
+async def test_monitoring_flag_is_saved_in_the_options_without_a_reload(hass, entry, camera):
+    camera.frame(jpeg())
+    await setup(hass, entry)
+    coordinator = entry.runtime_data
+    switch = ids(hass, entry)["monitoring"]
+
+    await hass.services.async_call("switch", "turn_off", {"entity_id": switch}, blocking=True)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entry.options[CONF_MONITORING] is False
+    assert CONF_MONITORING not in entry.data
+    # The other options stay.
+    assert entry.options[CONF_FAILURES] == 2
+    assert entry.runtime_data is coordinator
+
+
+def entry_0_1_0(hass, **data) -> MockConfigEntry:
+    """An entry as 0.1.0 saved it: minor version 1, the monitoring flag in the data."""
+    old = MockConfigEntry(
+        domain=DOMAIN,
+        title="Driveway",
+        unique_id=entry_unique_id(URL, STREAM),
+        data={CONF_URL: URL, CONF_STREAM: STREAM, **data},
+        options={CONF_FAILURES: 2},
+        version=1,
+        minor_version=1,
+    )
+    old.add_to_hass(hass)
+    return old
+
+
+@pytest.mark.parametrize("flag", [False, True])
+async def test_migration_moves_the_flag_of_0_1_0_to_the_options(hass, camera, flag):
+    old = entry_0_1_0(hass, **{CONF_MONITORING: flag})
+    camera.frame(jpeg())
+    await setup(hass, old)
+
+    assert old.state is ConfigEntryState.LOADED
+    assert old.minor_version == 2
+    assert old.data == {CONF_URL: URL, CONF_STREAM: STREAM}
+    assert old.options == {CONF_FAILURES: 2, CONF_MONITORING: flag}
+    assert state(hass, old, "monitoring") == (STATE_ON if flag else STATE_OFF)
+    assert camera.frame_requests == (1 if flag else 0)
+
+
+async def test_migration_without_the_flag_leaves_the_options(hass, camera):
+    old = entry_0_1_0(hass)
+    camera.frame(jpeg())
+    await setup(hass, old)
+
+    assert old.state is ConfigEntryState.LOADED
+    assert old.minor_version == 2
+    assert old.data == {CONF_URL: URL, CONF_STREAM: STREAM}
+    assert old.options == {CONF_FAILURES: 2}
+    assert state(hass, old, "monitoring") == STATE_ON
+
+
+async def test_migration_runs_once(hass, camera):
+    old = entry_0_1_0(hass, **{CONF_MONITORING: False})
+    camera.frame(jpeg())
+    await setup(hass, old)
+    await hass.services.async_call(
+        "switch", "turn_on", {"entity_id": ids(hass, old)["monitoring"]}, blocking=True
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    await hass.config_entries.async_reload(old.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert old.options[CONF_MONITORING] is True
+    assert state(hass, old, "monitoring") == STATE_ON
+
+    # Called again on a migrated entry, or on one of a newer minor version, it changes nothing.
+    for minor in (2, 3):
+        hass.config_entries.async_update_entry(old, minor_version=minor)
+        before = (dict(old.data), dict(old.options))
+        assert await async_migrate_entry(hass, old) is True
+        assert (dict(old.data), dict(old.options)) == before
+        assert old.minor_version == minor
+
+
+async def test_flag_in_the_data_of_a_migrated_entry_is_ignored(hass, camera):
+    # 0.1.0 run again on a migrated entry writes the flag back into the data and
+    # leaves the minor version at 2. Only the options count, so monitoring stays on.
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Driveway",
+        unique_id=entry_unique_id(URL, STREAM),
+        data={CONF_URL: URL, CONF_STREAM: STREAM, CONF_MONITORING: False},
+        options={CONF_FAILURES: 2},
+        version=1,
+        minor_version=2,
+    )
+    entry.add_to_hass(hass)
+    camera.frame(jpeg())
+    await setup(hass, entry)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert state(hass, entry, "monitoring") == STATE_ON
+    assert camera.frame_requests == 1
+    assert entry.minor_version == 2
+    assert entry.data == {CONF_URL: URL, CONF_STREAM: STREAM, CONF_MONITORING: False}
+    assert entry.options == {CONF_FAILURES: 2}
+
+
+async def test_entry_of_a_newer_major_version_is_refused(hass, camera):
+    new = MockConfigEntry(
+        domain=DOMAIN,
+        title="Driveway",
+        unique_id=entry_unique_id(URL, STREAM),
+        data={CONF_URL: URL, CONF_STREAM: STREAM, CONF_MONITORING: False},
+        version=2,
+        minor_version=1,
+    )
+    new.add_to_hass(hass)
+    assert await async_migrate_entry(hass, new) is False
+
+    await setup(hass, new)
+    assert new.state is ConfigEntryState.MIGRATION_ERROR
+    assert new.version == 2
+    assert new.data[CONF_MONITORING] is False
+    assert camera.frame_requests == 0
 
 
 async def test_turning_on_when_on_changes_nothing(hass, entry, camera):

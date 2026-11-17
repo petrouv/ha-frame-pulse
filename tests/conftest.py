@@ -120,6 +120,7 @@ def entry(hass) -> MockConfigEntry:
         unique_id=entry_unique_id(URL, STREAM),
         data={CONF_URL: URL, CONF_STREAM: STREAM},
         options={CONF_FAILURES: 2, CONF_SAME_FRAMES: 3},
+        minor_version=2,
     )
     config_entry.add_to_hass(hass)
     return config_entry

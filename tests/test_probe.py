@@ -507,9 +507,46 @@ async def test_probe_frame_with_a_wrong_api_login_is_probe_error(aioclient_mock,
     api = ApiAccess(username="viewer", password="hunter2")
     result = await probe_frame(session, GO2RTC, STREAM, "ffmpeg", 5, api=api)
     assert result == FrameResult(
-        Status.PROBE_ERROR, detail="go2rtc API failed: HTTP 401: the API login is missing or wrong"
+        Status.PROBE_ERROR,
+        detail="go2rtc API failed: HTTP 401: the API login is missing or wrong",
+        auth_failed=True,
     )
     assert sent_headers(aioclient_mock) == [VIEWER_HEADER]
+
+
+async def test_probe_frame_other_api_failure_is_not_an_auth_failure(aioclient_mock, session):
+    aioclient_mock.get(API_URL, status=403)
+    result = await probe_frame(session, GO2RTC, STREAM, "ffmpeg", 5)
+    assert result == FrameResult(Status.PROBE_ERROR, detail="go2rtc API failed: HTTP 403")
+
+
+async def test_rtsp_login_refused_is_not_an_api_auth_failure(aioclient_mock, session, fake_grab):
+    """ffmpeg's RTSP "401 Unauthorized" is the RTSP login, not the go2rtc API one."""
+    aioclient_mock.get(API_URL, json=API_INFO)
+    fake_grab.outcome = Grab(1, b"", "method DESCRIBE failed: 401 Unauthorized")
+    result = await probe_frame(session, GO2RTC, STREAM, "ffmpeg", 5)
+    assert result.status is Status.PROBE_ERROR
+    assert not result.auth_failed
+
+
+async def test_probe_frame_login_lost_after_a_failed_frame(aioclient_mock, session, monkeypatch):
+    """The login stops working between the version before the frame and the one after."""
+    aioclient_mock.get(API_URL, json=API_INFO)
+    api = ApiAccess(username="viewer", password="hunter2")
+
+    async def grab(binary, url, timeout):
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(API_URL, status=401)
+        return Grab(0, b"")
+
+    monkeypatch.setattr(probe, "grab_frame", grab)
+    result = await probe_frame(session, GO2RTC, STREAM, "ffmpeg", 5, api=api)
+    assert result.status is Status.PROBE_ERROR
+    assert result.auth_failed
+    assert result.detail == (
+        "go2rtc API failed: HTTP 401: the API login is missing or wrong (after 0 bytes)"
+    )
+    assert result.duration_ms is not None
 
 
 async def test_probe_frame_sends_the_login_on_every_request(aioclient_mock, session, fake_grab):
@@ -541,6 +578,7 @@ async def test_probe_frame_login_lost_during_the_check(aioclient_mock, session, 
     api = ApiAccess(username="viewer", password="hunter2")
     result = await probe_frame(session, GO2RTC, STREAM, "ffmpeg", 5, api=api)
     assert result.status is Status.PROBE_ERROR
+    assert result.auth_failed
     assert result.detail.startswith(
         "go2rtc API failed: HTTP 401: the API login is missing or wrong (after ffmpeg 8:"
     )

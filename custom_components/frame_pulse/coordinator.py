@@ -15,7 +15,11 @@ from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_SCAN_INTERVAL, CONF_URL
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
@@ -129,20 +133,44 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
         )
         # Bumped by every monitoring switch: a check started before the switch is discarded.
         self._generation = 0
+        # The check started by "Check now"; a press while it runs waits for it instead.
+        self._press_check: asyncio.Task[None] | None = None
+        # Whether the update before the running check failed, and by a refused login:
+        # see _async_refresh_finished.
+        self._failed_before = False
+        self._auth_failed_before = False
         # The first check runs in the background, so entities need a state before it.
         # A camera in planned shutdown is known to be off without any check.
         self.data = CameraState() if self.monitoring else disabled_state(CameraState())
 
     @property
     def monitoring(self) -> bool:
-        """Return whether monitoring is on."""
-        return self.config_entry.data.get(CONF_MONITORING, True)
+        """Return whether monitoring is on.
 
+        An entry saved by 0.1.0 had the flag in its data; the entry migration moves
+        it to the options before setup.
+        """
+        return self.config_entry.options.get(CONF_MONITORING, True)
+
+    @property
+    def auth_failed(self) -> bool:
+        """Return whether the last check failed because go2rtc refused the API login.
+
+        Polling then stays stopped until a check succeeds or the entry is reloaded.
+        Home Assistant keeps the last exception after a later success, so the last
+        update must also have failed.
+        """
+        return not self.last_update_success and isinstance(
+            self.last_exception, ConfigEntryAuthFailed
+        )
+
+    @callback
     def async_set_monitoring(self, enabled: bool) -> None:
         """Change the planned shutdown flag; turning on starts a check in the background.
 
-        The flag lives in the config entry, not in the entity state: it is needed
+        The flag lives in the entry options, not in the entity state: it is needed
         before the first poll, otherwise a restart would have to query the camera.
+        Saving it does not reload the entry: no update listener is registered.
         Until the check started by turning on ends, the camera state is unknown;
         while Home Assistant starts, that check waits until startup is over.
         Switching to the current value changes nothing.
@@ -151,9 +179,11 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
             return
         entry = self.config_entry
         self.hass.config_entries.async_update_entry(
-            entry, data={**entry.data, CONF_MONITORING: enabled}
+            entry, options={**entry.options, CONF_MONITORING: enabled}
         )
         self._generation += 1
+        # A press after the switch must not wait for a check whose result is thrown away.
+        self._press_check = None
         if enabled:
             self.async_set_updated_data(CameraState(last_frame_at=self.data.last_frame_at))
             # While Home Assistant starts, the check waits like the first one does:
@@ -179,7 +209,8 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
 
         The check runs as a task of the entry: cancelling the caller (a script
         stopped mid-check) does not cancel the check, which would otherwise mark
-        the entities unavailable until the next poll.
+        the entities unavailable until the next poll. A press while the check of
+        an earlier press still runs waits for that check instead of queuing one.
 
         If monitoring was switched off and on during the wait, the check started
         by turning on stands in for this one, so the call ends without an error.
@@ -189,11 +220,14 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
             ServiceValidationError: Monitoring is off, also when it was turned off
                 during the check.
             HomeAssistantError: The entry was reloaded or unloaded during the
-                check (options saved, address changed), which stopped it.
+                check (options saved, address changed), which stopped it, or
+                go2rtc refused the API login.
         """
         if self.monitoring:
+            if self._press_check is None or self._press_check.done():
+                self._press_check = self._start_check()
             try:
-                await asyncio.shield(self._start_check())
+                await asyncio.shield(self._press_check)
             except asyncio.CancelledError:
                 # The caller itself is being cancelled: let it go.
                 if (task := asyncio.current_task()) is not None and task.cancelling():
@@ -201,6 +235,10 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
                 raise HomeAssistantError(
                     translation_domain=DOMAIN, translation_key="check_cancelled"
                 ) from None
+            if self.auth_failed:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="api_auth_failed"
+                )
             if self.monitoring:
                 return
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="monitoring_off")
@@ -237,6 +275,8 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
 
     async def _async_update_data(self) -> CameraState:
         """Run one camera check."""
+        self._failed_before = not self.last_update_success
+        self._auth_failed_before = self.auth_failed
         if not self.monitoring:
             return self._disabled(self.data)
 
@@ -261,11 +301,32 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
         # check: its result then belongs to a state that no longer exists.
         if generation != self._generation:
             return self.data
+        # The coordinator then stops polling and Home Assistant asks for the login.
+        if result.auth_failed:
+            raise ConfigEntryAuthFailed(
+                translation_domain=DOMAIN, translation_key="api_auth_failed"
+            )
 
         state = self.data
         new_state = apply_result(state, result, self._limits, dt_util.utcnow())
         self._log_transition(state, new_state, result.detail)
         return new_state
+
+    @callback
+    def _async_refresh_finished(self) -> None:
+        """Update the entities when a failure follows a failure of the other kind.
+
+        Home Assistant does not update them after a failure that follows a failure,
+        but the Monitoring switch is available only after a refused login: without
+        this, it would keep the availability of the earlier failure while polling
+        is stopped.
+        """
+        if (
+            self._failed_before
+            and not self.last_update_success
+            and self.auth_failed != self._auth_failed_before
+        ):
+            self.async_update_listeners()
 
     def _log_transition(self, old: CameraState, new: CameraState, detail: str) -> None:
         """Log a change of status or connection at INFO; repeats go to DEBUG only.

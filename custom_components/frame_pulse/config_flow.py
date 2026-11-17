@@ -1,8 +1,13 @@
-"""UI setup: go2rtc address and API login, stream, name and RTSP access; reconfigure and options."""
+"""UI setup: go2rtc address and API login, stream, name and RTSP access.
+
+Also reauthentication, reconfigure and options.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from typing import Any
 
 import voluptuous as vol
@@ -20,7 +25,7 @@ from homeassistant.const import (
     CONF_URL,
     CONF_USERNAME,
 )
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -74,6 +79,7 @@ from .coordinator import (
 )
 from .probe import (
     MAX_RTSP_LOGIN,
+    FrameResult,
     Go2rtcAuthError,
     Go2rtcError,
     Status,
@@ -89,6 +95,34 @@ _LOGIN_KEYS = (*_API_KEYS, CONF_RTSP_USERNAME, CONF_RTSP_PASSWORD)
 # Form fields of each section that the reconfigure form fills from the entry: never a password.
 _RTSP_SHOWN = ((CONF_PORT, CONF_RTSP_PORT), (CONF_USERNAME, CONF_RTSP_USERNAME))
 _API_SHOWN = ((CONF_USERNAME, CONF_API_USERNAME),)
+# How long the trial check waits for a free check slot before the form reports busy checks.
+SLOT_WAIT = 10
+
+
+class _SlotBusy(Exception):
+    """No check slot became free in time for the trial check."""
+
+
+@asynccontextmanager
+async def _trial_slot(hass: HomeAssistant) -> AsyncIterator[None]:
+    """Take a check slot for the trial check, waiting at most `SLOT_WAIT` seconds.
+
+    The running cameras share the slots, and each may hold one for up to its
+    frame timeout, so without a limit the form could spin for minutes.
+
+    Raises:
+        _SlotBusy: No slot became free in time.
+    """
+    semaphore = probe_semaphore(hass)
+    try:
+        async with asyncio.timeout(SLOT_WAIT):
+            await semaphore.acquire()
+    except TimeoutError:
+        raise _SlotBusy from None
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 
 def _url_schema(default: str) -> vol.Schema:
@@ -265,6 +299,8 @@ class FramePulseConfigFlow(ConfigFlow, domain=DOMAIN):
     """Creates an entry: one entry is one camera."""
 
     VERSION = 1
+    # 2 since 0.1.1: the monitoring flag moved from the entry data to the options.
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._url = DEFAULT_URL
@@ -335,8 +371,8 @@ class FramePulseConfigFlow(ConfigFlow, domain=DOMAIN):
         """Pick a stream, a name and the RTSP settings, then run a trial check.
 
         A failed frame does not block saving: the camera may be off.
-        Only an RTSP login that is incomplete or too long, a broken check or an
-        unknown stream does.
+        Only an RTSP login that is incomplete or too long, no free check slot
+        within `SLOT_WAIT` seconds, a broken check or an unknown stream does.
         """
         errors: dict[str, str] = {}
         placeholders: dict[str, str] = {}
@@ -351,32 +387,24 @@ class FramePulseConfigFlow(ConfigFlow, domain=DOMAIN):
             self._typed = _logins(rtsp)
             if rtsp_error:
                 errors["base"] = rtsp_error
+            elif (result := await self._trial_check(stream, rtsp)) is None:
+                errors["base"] = "checks_busy"
+                placeholders["seconds"] = str(SLOT_WAIT)
+            elif result.status is Status.PROBE_ERROR:
+                # The API answered in the previous step, so the reason is usually
+                # RTSP or ffmpeg; the scrubbed detail tells which, or names
+                # HTTP 401 if the API login stopped working since.
+                errors["base"] = "check_failed"
+                placeholders["reason"] = result.detail
+                # The RTSP login may be the reason, so it must be typed again.
+                self._typed = {}
+            elif result.status is Status.STREAM_NOT_FOUND:
+                errors[CONF_STREAM] = "stream_not_found"
             else:
-                result = await probe_frame(
-                    async_get_clientsession(self.hass),
-                    self._url,
-                    stream,
-                    get_ffmpeg_manager(self.hass).binary,
-                    DEFAULT_FRAME_TIMEOUT,
-                    probe_semaphore(self.hass),
-                    access=rtsp_access(rtsp),
-                    api=api_access(self._api),
+                return self.async_create_entry(
+                    title=user_input[CONF_NAME],
+                    data={CONF_URL: self._url, CONF_STREAM: stream, **self._api, **rtsp},
                 )
-                if result.status is Status.PROBE_ERROR:
-                    # The API answered in the previous step, so the reason is usually
-                    # RTSP or ffmpeg; the scrubbed detail tells which, or names
-                    # HTTP 401 if the API login stopped working since.
-                    errors["base"] = "check_failed"
-                    placeholders["reason"] = result.detail
-                    # The RTSP login may be the reason, so it must be typed again.
-                    self._typed = {}
-                elif result.status is Status.STREAM_NOT_FOUND:
-                    errors[CONF_STREAM] = "stream_not_found"
-                else:
-                    return self.async_create_entry(
-                        title=user_input[CONF_NAME],
-                        data={CONF_URL: self._url, CONF_STREAM: stream, **self._api, **rtsp},
-                    )
 
         schema = vol.Schema(
             {
@@ -399,14 +427,82 @@ class FramePulseConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders=placeholders,
         )
 
+    async def _trial_check(self, stream: str, rtsp: Mapping[str, Any]) -> FrameResult | None:
+        """Run the trial check of the stream step; `None` if no check slot became free."""
+        try:
+            return await probe_frame(
+                async_get_clientsession(self.hass),
+                self._url,
+                stream,
+                get_ffmpeg_manager(self.hass).binary,
+                DEFAULT_FRAME_TIMEOUT,
+                _trial_slot(self.hass),
+                access=rtsp_access(rtsp),
+                api=api_access(self._api),
+            )
+        except _SlotBusy:
+            return None
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
+        """Start reauthentication: go2rtc refused the API login or asks for a missing one."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the go2rtc API login again and check it against go2rtc.
+
+        The fields work as in the API section of the other forms, except that
+        the saved password is never reused, since go2rtc refused it: an empty
+        password means none (a username alone), or the one typed before a form
+        error for the same username. An empty username drops the login. The
+        saved go2rtc address is used; a new address goes through Reconfigure.
+        """
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            saved = {k: v for k, v in entry.data.items() if k != CONF_API_PASSWORD}
+            api, api_error = _api_data(user_input, saved, self._typed)
+            self._typed = _logins(api)
+            if api_error:
+                # The shared text speaks of a saved password, which this form never reuses.
+                errors["base"] = "reauth_api_login"
+            else:
+                try:
+                    await list_streams(
+                        async_get_clientsession(self.hass),
+                        entry.data[CONF_URL],
+                        api=api_access(api),
+                    )
+                except Go2rtcAuthError:
+                    # A refused password is not kept: an empty field then means none.
+                    self._typed = {}
+                    errors["base"] = "invalid_auth"
+                except Go2rtcError:
+                    # This form shows no address, so the text names the saved one.
+                    errors["base"] = "reauth_cannot_connect"
+                else:
+                    kept = {k: v for k, v in entry.data.items() if k not in _API_KEYS}
+                    return self.async_update_reload_and_abort(entry, data={**kept, **api})
+            suggested = _without_password(user_input)
+        else:
+            suggested = {key: entry.data[name] for key, name in _API_SHOWN if name in entry.data}
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=self.add_suggested_values_to_schema(vol.Schema(_login_fields()), suggested),
+            errors=errors,
+            description_placeholders={"name": entry.title},
+        )
+
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Change the go2rtc address, API login and RTSP settings without a connection check.
 
         The connection is not checked on purpose: an unreachable go2rtc or a
-        wrong login must show up as `probe_error` in the camera status, not
-        block saving. Errors are reported in the order of the form.
+        wrong RTSP login must show up as `probe_error` in the camera status,
+        and a refused API login as a reauthentication request, not block
+        saving. Errors are reported in the order of the form.
         """
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
@@ -468,7 +564,8 @@ class FramePulseOptionsFlow(OptionsFlowWithReload):
             if 0 < user_input[CONF_SAME_FRAMES] < MIN_SAME_FRAMES:
                 errors[CONF_SAME_FRAMES] = "invalid_same_frames"
             else:
-                return self.async_create_entry(data=user_input)
+                # The monitoring flag of the switch is kept in the options too.
+                return self.async_create_entry(data={**self.config_entry.options, **user_input})
 
         values = user_input or self.config_entry.options
         schema = vol.Schema(

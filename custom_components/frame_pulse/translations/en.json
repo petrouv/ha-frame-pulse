@@ -20,7 +20,7 @@
             },
             "data_description": {
               "username": "api.username from the go2rtc configuration. Empty: no login.",
-              "password": "api.password from the go2rtc configuration. Leave it empty if go2rtc sets api.username without a password. After a form error the field comes back empty: left empty, it keeps the password typed before for the same username, unless go2rtc refused that login."
+              "password": "api.password from the go2rtc configuration. Leave it empty if go2rtc sets api.username without a password. After a form error the field comes back empty: left empty, it keeps the password typed before for the same username, unless go2rtc refused that login or the address was invalid and held @."
             }
           }
         }
@@ -53,9 +53,21 @@
           }
         }
       },
+      "reauth_confirm": {
+        "title": "go2rtc API login",
+        "description": "go2rtc refused the API login of {name}, or asks for one and none is saved, so the checks of this camera are paused. Enter api.username and api.password from the go2rtc configuration; the login is tried at the saved go2rtc address before it is saved. Each camera added from this go2rtc asks on its own. If go2rtc has moved, change the address with Reconfigure instead, which also ends this request.",
+        "data": {
+          "username": "API username",
+          "password": "API password"
+        },
+        "data_description": {
+          "username": "api.username from the go2rtc configuration. Empty: no login.",
+          "password": "api.password from the go2rtc configuration. A saved password is not used, since go2rtc refused it, and passwords are not shown. An empty field means no password (go2rtc sets api.username without one); after a form error it keeps the password typed before for the same username, unless go2rtc refused that login."
+        }
+      },
       "reconfigure": {
         "title": "go2rtc connection",
-        "description": "The settings are saved without a connection check. If go2rtc or its RTSP server is unreachable or the go2rtc API login or the RTSP login is wrong, the camera status becomes \"Check failed\".",
+        "description": "The settings are saved without a connection check. If go2rtc or its RTSP server is unreachable or the RTSP login is wrong, the camera status becomes \"Check failed\". If go2rtc refuses the API login, Home Assistant asks for it again.",
         "data": {
           "url": "go2rtc address"
         },
@@ -96,9 +108,12 @@
       "api_login": "A go2rtc API password needs its username, and a new username in place of a saved password needs its password: an empty field keeps the saved one only for the same username. The username cannot contain a colon.",
       "cannot_connect": "No proper go2rtc reply at this address: it is unreachable or another service answers.",
       "check_failed": "go2rtc answers, but the trial check failed: {reason}. Check that the go2rtc RTSP server is on and reachable from Home Assistant, that the RTSP port and login below are right, and that ffmpeg works. \"HTTP 401\" means the go2rtc API login of the previous step stopped working: start the setup again.",
-      "invalid_auth": "The go2rtc API refused the login: go2rtc asks for one and it is missing or wrong. Enter api.username and api.password from go2rtc.yaml in the \"go2rtc API login\" section.",
+      "checks_busy": "Other cameras are being checked and no check slot became free in {seconds} seconds. Try again in a minute.",
+      "invalid_auth": "The go2rtc API refused the login: go2rtc asks for one and it is missing or wrong. Enter api.username and api.password from go2rtc.yaml under \"go2rtc API login\".",
       "invalid_url": "Enter an http or https address of go2rtc.",
       "no_streams": "go2rtc has no streams configured.",
+      "reauth_api_login": "A go2rtc API password needs its username, and the username cannot contain a colon.",
+      "reauth_cannot_connect": "No proper go2rtc reply at the saved address: it is unreachable or another service answers. If go2rtc has moved, change the address with Reconfigure.",
       "rtsp_login": "Enter both the RTSP username and the password, or neither.",
       "rtsp_login_long": "The RTSP username and password are too long: ffmpeg would cut them. Encoded as username:password they must fit in 127 characters, where most symbols take 3 characters each and a non-Latin or accented letter 6 or more. Use a shorter username or password.",
       "stream_not_found": "go2rtc does not know this stream.",
@@ -106,6 +121,7 @@
     },
     "abort": {
       "already_configured": "This go2rtc stream is already added as a camera.",
+      "reauth_successful": "The go2rtc API login has been updated.",
       "reconfigure_successful": "The settings have been updated."
     }
   },
@@ -121,7 +137,7 @@
         },
         "data_description": {
           "scan_interval": "How often a frame is taken, from 15 to 3600.",
-          "frame_timeout": "How long one check may wait for a frame, from 5 to 60. Longer than this gives \"Frame timeout\".",
+          "frame_timeout": "How long one check may wait for a frame, from 5 to 60. Longer than this usually gives \"Frame timeout\", or \"Check failed\" if go2rtc or its RTSP port stops answering.",
           "failures": "Checks in a row without a valid frame (No stream, Bad frame, Frame timeout) before the connection sensor turns off, from 1 to 10. \"Check failed\" and \"Stream not found\" are not counted and do not reset the count.",
           "same_frames": "From 2 to 100, or 0 to turn off the freeze check."
         }
@@ -173,6 +189,9 @@
     }
   },
   "exceptions": {
+    "api_auth_failed": {
+      "message": "go2rtc refused the API login. Enter the current login when Home Assistant asks for it in Settings > Devices & services."
+    },
     "check_cancelled": {
       "message": "The check was stopped because the camera entry was reloaded. Try again."
     },
