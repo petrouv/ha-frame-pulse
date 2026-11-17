@@ -1,5 +1,8 @@
 # Frame Pulse
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=petrouv&repository=ha-frame-pulse&category=integration)
+[![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=frame_pulse)
+
 A Home Assistant integration that checks all your cameras by one criterion: **does the camera actually return a fresh
 frame?** At every interval it takes one keyframe of the stream from [go2rtc](https://github.com/AlexxIT/go2rtc) and
 creates entities for each camera, so a single automation can notify you when a camera drops off, freezes or comes back.
@@ -45,10 +48,11 @@ since it is pressed on purpose. An entry added or reloaded later is checked at o
 
 ## Installation
 
-1. Open [this My Home Assistant link](https://my.home-assistant.io/redirect/hacs_repository/?owner=petrouv&repository=ha-frame-pulse&category=integration).
-   It opens HACS on Home Assistant before 2026.11 and the Marketplace on 2026.11 and newer. Since the link names the
-   category, it offers to add the repository as a custom repository: it is not in the default catalog yet. Download
-   the integration there, then restart Home Assistant.
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=petrouv&repository=ha-frame-pulse&category=integration)
+
+1. Click the button above, or find Frame Pulse by name in HACS (Home Assistant before 2026.11) or in the Marketplace
+   (2026.11 and newer). Download it, then restart Home Assistant. If search does not find it, the button offers to add
+   the repository as a custom repository instead.
 2. Without HACS or the Marketplace, copy `custom_components/frame_pulse` from the
    [latest release](https://github.com/petrouv/ha-frame-pulse/releases/latest) to `config/custom_components/frame_pulse`
    and restart Home Assistant.
@@ -56,8 +60,11 @@ since it is pressed on purpose. An entry added or reloaded later is checked at o
 
 ## Configuration
 
-**Settings → Devices & services → Add integration → Frame Pulse.** One entry is one camera: the go2rtc address
-(`http://127.0.0.1:1984` by default), a stream from the list and a name. One trial check runs when the entry is created.
+[![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=frame_pulse)
+
+Click the button above, or go to **Settings → Devices & services → Add integration → Frame Pulse**. One entry is one
+camera: the go2rtc address (`http://127.0.0.1:1984` by default), a stream from the list and a name. One trial check
+runs when the entry is created.
 A camera is the go2rtc instance plus the stream, so the same stream name on another go2rtc is added as another
 camera. The address may be pasted from the go2rtc web UI or from an API request: the page name, `/api` with the name
 after it (as in `/api/streams?src=cam`) and the query are dropped. Any other path is kept as typed, `%2F` included,
