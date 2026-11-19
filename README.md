@@ -115,8 +115,17 @@ Options apply without a Home Assistant restart (the entry reloads, the camera st
 | Frame timeout | 20 s | 5–60 s |
 | Failures in a row before "disconnected" | 2 | 1–10 |
 | Identical frames in a row before "frozen" | 5 | 2–100; 0 turns the check off |
+| Snapshot stream | the monitored stream | a go2rtc stream |
 
-At most 2 ffmpeg runs go at the same time across the whole integration, including the trial check of the setup form. Any further check waits for a free slot, and the wait does not count as response time.
+The snapshot stream is the stream the [snapshot action](#snapshot-action) saves, usually the full-resolution main
+stream of the camera while the checks run on its substream. Checks keep using the monitored stream. The form takes the
+list from go2rtc each time it opens; if go2rtc does not answer, it says so and offers only the monitored stream and the
+saved snapshot stream, and the other options can still be saved. Streams named by address show only their safe label,
+as in the setup list (see [Security](#security)).
+
+At most 2 checks run ffmpeg at the same time across the whole integration, including the trial check of the setup form. Any further check waits for a free slot, and the wait does not count as response time.
+Snapshots have 2 slots of their own, so a snapshot never waits behind checks of hanging cameras, and at most 4 ffmpeg
+runs go at once in all.
 The trial check waits at most 10 seconds for a free slot: if none becomes free by then, the form says that other cameras are being
 checked, and the form can be sent again a little later.
 
@@ -273,6 +282,54 @@ row (two by default). The price:
 - A refused go2rtc API login is not `probe_error`, so the `probe_error` trigger does not fire for it; Home Assistant
   asks for the login itself, see [When go2rtc refuses the API login](#when-go2rtc-refuses-the-api-login).
 
+## Snapshot action
+
+`frame_pulse.snapshot` saves one keyframe of a camera as a JPEG file, without a `shell_command`. The camera is named by
+its Frame Pulse device (`device_id`) or entry (`config_entry_id`), not by a stream: the frame comes from the snapshot
+stream of the entry (see the options above), taken the way a check takes it, through the go2rtc RTSP server with the
+saved RTSP port and login and the go2rtc API login.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `device_id` or `config_entry_id` | one of them | The camera |
+| `filename` | yes | Absolute path of the file, a template allowed, as in `camera.snapshot`. The folder must be in `allowlist_external_dirs` or be a media folder (`/media` in a container or Home Assistant OS); it is created if missing. An existing file is replaced |
+| `timeout` | no | How long ffmpeg may wait for the frame, 5–60 s; the frame timeout of the camera options by default |
+
+The file is written only when a valid JPEG arrives, and it appears whole or not at all: the frame goes to a hidden
+temporary file in the same folder (`.frame_pulse-<random>.tmp`), which is renamed over the target or removed. Media
+does not list hidden files. A temporary file left by a write cut short (Home Assistant killed mid-write) is removed by the
+next snapshot to that folder once it is a minute old. The action
+responds with the path and the size in bytes, `{"path": "/media/snapshots/20261120_081500.jpg", "size": 133120}`.
+Without a valid frame it fails with the status and the reason, as in the log line of a check, for example
+`No snapshot of Driveway: frame_timeout (no frame in 10 s)`; a wrong camera, a relative path or a folder that is not
+allowed, or a path that is a folder, fails before any frame is taken. The timeout bounds only the ffmpeg run, like the
+frame timeout of a check: a free snapshot slot may be waited for first, and the go2rtc API is asked before the run and,
+after a failed frame, once more (up to 5 s each), so a failing call can take longer than the timeout.
+
+A snapshot is not a check: it changes no entity, counts towards neither threshold and runs while monitoring is off or
+while Home Assistant waits for the go2rtc API login. A refused API login fails the snapshot, but only a check asks for
+the login again.
+
+An example: save a frame when a person is detected and pass its path on, or an empty one when there is no frame, so a
+notification can go without a picture. `continue_on_error` lets the automation go on after a failed snapshot; the
+response variable is then not set.
+
+```yaml
+actions:
+  - variables:
+      snap: snapshots/driveway/{{ now().strftime('%Y%m%d_%H%M%S') }}.jpg
+  - action: frame_pulse.snapshot
+    continue_on_error: true
+    data:
+      device_id: 0123456789abcdef0123456789abcdef  # the Frame Pulse device of the camera
+      filename: /media/{{ snap }}
+      timeout: 10
+    response_variable: shot
+  - event: driveway_snapshot_saved
+    event_data:
+      snap: "{{ snap if shot is defined and shot.size is defined else '' }}"
+```
+
 ## Limitations
 
 - **A freeze is detected only by an exact SHA-256 match of the whole JPEG.** Sensor noise and the on-screen clock usually
@@ -350,7 +407,9 @@ logged reason is cut to 200 characters.
 
 Diagnostics contain the entry data (the go2rtc address, the API username and password and the RTSP username and
 password redacted, the stream name in
-the safe form above), the options, the status, counters and times. Frames are not written to disk or to history. The
+the safe form above), the options (the snapshot stream in the same safe form), the status, counters and times. Checks
+write no frames to disk or to history; only the snapshot action writes one, to the file it is given, after
+`hass.config.is_allowed_path` has passed it (`allowlist_external_dirs` and the media folders). The
 SHA-256 digest of the last frame is kept only in the saved state Home Assistant restores after a restart
 (`.storage/core.restore_state`), so a freeze survives the restart; it is not in history or diagnostics.
 

@@ -11,6 +11,9 @@ CONF_MONITORING = "monitoring"
 CONF_FRAME_TIMEOUT = "frame_timeout"
 CONF_FAILURES = "failures"
 CONF_SAME_FRAMES = "same_frames"
+# The go2rtc stream the snapshot action takes its frame from; an entry without it
+# takes the monitored one.
+CONF_SNAPSHOT_STREAM = "snapshot_stream"
 # The form section with the go2rtc API login, and the entry data it fills.
 # An entry without these keys reaches an API that asks for no login.
 CONF_API = "api"
@@ -36,6 +39,15 @@ MAX_FAILURES = 10
 MIN_SAME_FRAMES = 2
 MAX_SAME_FRAMES = 100
 
-# At most this many ffmpeg runs at once across the whole integration, the setup
-# form's trial check included; other checks wait for a slot.
+# At most this many check ffmpeg runs at once across the whole integration, the
+# setup form's trial check included; other checks wait for a slot.
 MAX_CONCURRENT_PROBES = 2
+# Snapshots have slots of their own, so a snapshot never waits behind checks of
+# hanging cameras, and a burst of snapshots still starts a bounded number of ffmpeg runs.
+MAX_CONCURRENT_SNAPSHOTS = 2
+
+SERVICE_SNAPSHOT = "snapshot"
+ATTR_CONFIG_ENTRY_ID = "config_entry_id"
+ATTR_DEVICE_ID = "device_id"
+ATTR_FILENAME = "filename"
+ATTR_TIMEOUT = "timeout"

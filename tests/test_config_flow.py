@@ -33,6 +33,7 @@ from custom_components.frame_pulse.const import (
     CONF_RTSP_PORT,
     CONF_RTSP_USERNAME,
     CONF_SAME_FRAMES,
+    CONF_SNAPSHOT_STREAM,
     CONF_STREAM,
     DEFAULT_SAME_FRAMES,
     DEFAULT_URL,
@@ -1473,6 +1474,7 @@ async def test_options_out_of_range_rejected(hass, entry, aioclient_mock):
 async def test_options_save_keeps_the_monitoring_flag(hass, entry, aioclient_mock):
     """The switch keeps its flag in the options, which the options form replaces as a whole."""
     hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MONITORING: False})
+    go2rtc(aioclient_mock)
     await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
 
@@ -1491,7 +1493,83 @@ async def test_options_save_keeps_the_monitoring_flag(hass, entry, aioclient_moc
         CONF_MONITORING: False,
     }
     assert entry.runtime_data.data.status == "disabled"
-    assert aioclient_mock.call_count == 0
+    # Only the stream list of the snapshot stream field: the entry ran no check.
+    assert [str(url) for _, url, _, _ in aioclient_mock.mock_calls] == [STREAMS_URL]
+
+
+def snapshot_field(result) -> tuple[list[str], str]:
+    """Return the offered snapshot stream labels and the default of the options form."""
+    for key, value in result["data_schema"].schema.items():
+        if str(key) == CONF_SNAPSHOT_STREAM:
+            return [option["value"] for option in value.config["options"]], key.default()
+    raise AssertionError("no snapshot stream field")
+
+
+OPTIONS = {CONF_SCAN_INTERVAL: 60, CONF_FRAME_TIMEOUT: 20, CONF_FAILURES: 2, CONF_SAME_FRAMES: 3}
+
+
+async def test_snapshot_stream_is_picked_from_go2rtc(hass, entry, aioclient_mock):
+    go2rtc(aioclient_mock, streams={**STREAMS, SECRET_URL: {}})
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    # A stream named by its address shows only its safe label, here and in the browser.
+    assert snapshot_field(result) == (["driveway_sd", "garage_sub", "rtsp://***"], STREAM)
+    assert result["errors"] == {}
+    assert "hunter2" not in str(
+        probatio.to_field_list(result["data_schema"], custom_serializer=cv.custom_serializer)
+    )
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**OPTIONS, CONF_SNAPSHOT_STREAM: "rtsp://***"}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert entry.options[CONF_SNAPSHOT_STREAM] == SECRET_URL
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert snapshot_field(result)[1] == "rtsp://***"
+
+    # The monitored stream is the default, so picking it removes the saved choice.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**OPTIONS, CONF_SNAPSHOT_STREAM: STREAM}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert CONF_SNAPSHOT_STREAM not in entry.options
+
+
+async def test_snapshot_stream_kept_while_go2rtc_does_not_answer(hass, entry, aioclient_mock):
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_SNAPSHOT_STREAM: "driveway_main"}
+    )
+    go2rtc(aioclient_mock)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(STREAMS_URL, status=401)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["errors"] == {"base": "streams_unavailable"}
+    assert snapshot_field(result) == (["driveway_main", "driveway_sd"], "driveway_main")
+
+    # The other options can still be saved, and the error stays until the form closes.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**OPTIONS, CONF_SAME_FRAMES: 1, CONF_SNAPSHOT_STREAM: STREAM}
+    )
+    assert result["errors"] == {
+        CONF_SAME_FRAMES: "invalid_same_frames",
+        "base": "streams_unavailable",
+    }
+    # The pick of the rejected form is shown again.
+    assert snapshot_field(result)[1] == STREAM
+
+    # go2rtc is back for the check after the reload.
+    go2rtc(aioclient_mock)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**OPTIONS, CONF_FAILURES: 5, CONF_SNAPSHOT_STREAM: "driveway_main"}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert entry.options == {**OPTIONS, CONF_FAILURES: 5, CONF_SNAPSHOT_STREAM: "driveway_main"}
 
 
 async def test_reconfigure_keeps_the_monitoring_flag_in_the_options(hass, entry, aioclient_mock):

@@ -133,18 +133,21 @@
           "scan_interval": "Check interval, seconds",
           "frame_timeout": "Frame timeout, seconds",
           "failures": "Failures in a row before \"disconnected\"",
-          "same_frames": "Identical frames in a row before \"frozen\""
+          "same_frames": "Identical frames in a row before \"frozen\"",
+          "snapshot_stream": "Snapshot stream"
         },
         "data_description": {
           "scan_interval": "How often a frame is taken, from 15 to 3600.",
           "frame_timeout": "How long one check may wait for a frame, from 5 to 60. Longer than this usually gives \"Frame timeout\", or \"Check failed\" if go2rtc or its RTSP port stops answering.",
           "failures": "Checks in a row without a valid frame (No stream, Bad frame, Frame timeout) before the connection sensor turns off, from 1 to 10. \"Check failed\" and \"Stream not found\" are not counted and do not reset the count.",
-          "same_frames": "From 2 to 100, or 0 to turn off the freeze check."
+          "same_frames": "From 2 to 100, or 0 to turn off the freeze check.",
+          "snapshot_stream": "The go2rtc stream that the frame_pulse.snapshot action saves, usually the full-resolution main stream of this camera. The monitored stream is the default. Checks keep using the monitored stream."
         }
       }
     },
     "error": {
-      "invalid_same_frames": "Enter 0 or a value from 2 to 100."
+      "invalid_same_frames": "Enter 0 or a value from 2 to 100.",
+      "streams_unavailable": "go2rtc did not return its stream list, so only the monitored and the saved snapshot streams are offered. The other options can be saved as usual."
     }
   },
   "entity": {
@@ -192,11 +195,56 @@
     "api_auth_failed": {
       "message": "go2rtc refused the API login. Enter the current login when Home Assistant asks for it in Settings > Devices & services."
     },
+    "camera_not_found": {
+      "message": "No Frame Pulse camera has this device or entry."
+    },
+    "camera_not_loaded": {
+      "message": "The camera {camera} is not loaded. Check its entry in Settings > Devices & services."
+    },
     "check_cancelled": {
       "message": "The check was stopped because the camera entry was reloaded. Try again."
     },
     "monitoring_off": {
       "message": "Monitoring is off. Turn it on to check the camera."
+    },
+    "path_is_folder": {
+      "message": "{path} is a folder: name the file."
+    },
+    "path_not_absolute": {
+      "message": "The file name {path} is not an absolute path."
+    },
+    "path_not_allowed": {
+      "message": "Cannot write {path}: the folder is not allowed. Add it to allowlist_external_dirs in configuration.yaml, or use a media folder."
+    },
+    "snapshot_failed": {
+      "message": "No snapshot of {camera}: {status} ({detail})."
+    },
+    "snapshot_write_failed": {
+      "message": "Cannot write the snapshot to {path}: {error}."
+    }
+  },
+  "services": {
+    "snapshot": {
+      "name": "Save snapshot",
+      "description": "Saves one keyframe of a Frame Pulse camera as a JPEG file, taken from go2rtc the way a check takes it, from the snapshot stream set in the camera options. The file is written only when a valid frame arrives and appears whole or not at all. Returns the path and the size of the file.",
+      "fields": {
+        "device_id": {
+          "name": "Camera device",
+          "description": "The Frame Pulse camera device. Give the device or the entry, not both."
+        },
+        "config_entry_id": {
+          "name": "Camera entry",
+          "description": "The Frame Pulse camera entry. Give the device or the entry, not both."
+        },
+        "filename": {
+          "name": "File name",
+          "description": "Absolute path of the JPEG file, a template allowed. The folder must be in allowlist_external_dirs or a media folder; it is created if missing. An existing file is replaced."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "How long ffmpeg may wait for the frame, from 5 to 60 seconds. The go2rtc API requests around it are not counted. Empty: the frame timeout of the camera options."
+        }
+      }
     }
   }
 }

@@ -4,13 +4,24 @@ from __future__ import annotations
 
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.typing import ConfigType
 
 from .config_flow import FramePulseConfigFlow
-from .const import CONF_MONITORING
+from .const import CONF_MONITORING, DOMAIN
 from .coordinator import FramePulseConfigEntry, FramePulseCoordinator
+from .snapshot import async_setup_services
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR, Platform.SWITCH]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the actions once for the integration, so they exist with no camera loaded."""
+    async_setup_services(hass)
+    return True
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: FramePulseConfigEntry) -> bool:

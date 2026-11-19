@@ -1,7 +1,7 @@
 """Entry diagnostics: entry data and options, status, counters and times.
 
 The go2rtc address, the go2rtc API login and the RTSP login are redacted, and
-the stream name is given in its safe form.
+the stream names are given in their safe form.
 """
 
 from __future__ import annotations
@@ -18,9 +18,11 @@ from .const import (
     CONF_API_USERNAME,
     CONF_RTSP_PASSWORD,
     CONF_RTSP_USERNAME,
+    CONF_SNAPSHOT_STREAM,
     CONF_STREAM,
 )
 from .coordinator import FramePulseConfigEntry
+from .probe import stream_label
 
 TO_REDACT = {
     CONF_URL,
@@ -41,11 +43,14 @@ async def async_get_config_entry_diagnostics(
     """Collect diagnostics. The frame digest is left out on purpose."""
     coordinator = entry.runtime_data
     state = coordinator.data
+    options = dict(entry.options)
+    if CONF_SNAPSHOT_STREAM in options:
+        options[CONF_SNAPSHOT_STREAM] = stream_label(options[CONF_SNAPSHOT_STREAM])
     return {
         "entry": async_redact_data(
             {**entry.data, CONF_STREAM: coordinator.stream_label}, TO_REDACT
         ),
-        "options": dict(entry.options),
+        "options": options,
         "status": state.status,
         "connected": state.connected,
         "failures": state.failures,

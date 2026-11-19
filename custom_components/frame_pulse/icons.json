@@ -29,5 +29,10 @@
         }
       }
     }
+  },
+  "services": {
+    "snapshot": {
+      "service": "mdi:camera"
+    }
   }
 }

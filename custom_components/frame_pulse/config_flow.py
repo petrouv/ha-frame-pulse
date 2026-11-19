@@ -54,6 +54,7 @@ from .const import (
     CONF_RTSP_PORT,
     CONF_RTSP_USERNAME,
     CONF_SAME_FRAMES,
+    CONF_SNAPSHOT_STREAM,
     CONF_STREAM,
     DEFAULT_FAILURES,
     DEFAULT_FRAME_TIMEOUT,
@@ -556,8 +557,35 @@ class FramePulseConfigFlow(ConfigFlow, domain=DOMAIN):
 class FramePulseOptionsFlow(OptionsFlowWithReload):
     """Options of the camera check; saving reloads the entry, no Home Assistant restart needed."""
 
+    def __init__(self) -> None:
+        # Safe label -> stream name for the snapshot stream, fetched when the form first shows.
+        self._choices: dict[str, str] | None = None
+        self._streams_failed = False
+
+    async def _snapshot_choices(self) -> dict[str, str]:
+        """Return the snapshot stream choices: the go2rtc streams plus the saved ones.
+
+        The monitored stream and the saved snapshot stream are always offered, so
+        the form can show and keep them while go2rtc does not answer; the form
+        then says that the list is incomplete.
+        """
+        entry = self.config_entry
+        known = {entry.data[CONF_STREAM], entry.options.get(CONF_SNAPSHOT_STREAM)} - {None}
+        try:
+            streams = await list_streams(
+                async_get_clientsession(self.hass), entry.data[CONF_URL], api=api_access(entry.data)
+            )
+        except Go2rtcError:
+            self._streams_failed = True
+            streams = []
+        return _stream_choices(sorted({*streams, *known}))
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show and validate the options."""
+        if self._choices is None:
+            self._choices = await self._snapshot_choices()
+        entry = self.config_entry
+        monitored = entry.data[CONF_STREAM]
         errors: dict[str, str] = {}
         if user_input is not None:
             # The selector cannot express "0 or 2-100": it accepts 1, which is not a valid value.
@@ -565,9 +593,22 @@ class FramePulseOptionsFlow(OptionsFlowWithReload):
                 errors[CONF_SAME_FRAMES] = "invalid_same_frames"
             else:
                 # The monitoring flag of the switch is kept in the options too.
-                return self.async_create_entry(data={**self.config_entry.options, **user_input})
+                options = {**entry.options, **user_input}
+                # The monitored stream is the default, so it is not saved as a choice:
+                # an entry without the key follows it.
+                snapshot = self._choices[options.pop(CONF_SNAPSHOT_STREAM)]
+                if snapshot != monitored:
+                    options[CONF_SNAPSHOT_STREAM] = snapshot
+                return self.async_create_entry(data=options)
+        if self._streams_failed:
+            errors["base"] = "streams_unavailable"
 
-        values = user_input or self.config_entry.options
+        values = user_input or entry.options
+        if user_input is not None:
+            snapshot_label = user_input[CONF_SNAPSHOT_STREAM]
+        else:
+            current = entry.options.get(CONF_SNAPSHOT_STREAM, monitored)
+            snapshot_label = next(label for label, name in self._choices.items() if name == current)
         schema = vol.Schema(
             {
                 vol.Required(
@@ -584,6 +625,14 @@ class FramePulseOptionsFlow(OptionsFlowWithReload):
                 vol.Required(
                     CONF_SAME_FRAMES, default=values.get(CONF_SAME_FRAMES, DEFAULT_SAME_FRAMES)
                 ): _number(0, MAX_SAME_FRAMES),
+                vol.Required(CONF_SNAPSHOT_STREAM, default=snapshot_label): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=label, label=label) for label in self._choices
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

@@ -105,6 +105,7 @@ class FrameResult:
         duration_ms: How long ffmpeg ran, `None` if it did not start.
         auth_failed: The go2rtc API refused its login (HTTP 401); the status is
             then `probe_error`. A refused RTSP login does not set it.
+        frame: The JPEG of a valid frame, empty otherwise.
     """
 
     status: Status
@@ -112,6 +113,7 @@ class FrameResult:
     detail: str = ""
     duration_ms: int | None = None
     auth_failed: bool = False
+    frame: bytes = field(default=b"", repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -584,7 +586,7 @@ async def probe_frame(
     status = classify_grab(grab)
     if status is Status.OK:
         digest = hashlib.sha256(grab.frame).hexdigest()
-        return FrameResult(status, digest=digest, duration_ms=duration_ms)
+        return FrameResult(status, digest=digest, duration_ms=duration_ms, frame=grab.frame)
     if status is Status.FRAME_TIMEOUT:
         detail = f"no frame in {timeout} s"
     elif grab.returncode == 0:

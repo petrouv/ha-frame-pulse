@@ -36,6 +36,7 @@ from .const import (
     CONF_RTSP_PORT,
     CONF_RTSP_USERNAME,
     CONF_SAME_FRAMES,
+    CONF_SNAPSHOT_STREAM,
     CONF_STREAM,
     DEFAULT_FAILURES,
     DEFAULT_FRAME_TIMEOUT,
@@ -43,10 +44,12 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_CONCURRENT_PROBES,
+    MAX_CONCURRENT_SNAPSHOTS,
 )
 from .probe import (
     ApiAccess,
     CameraState,
+    FrameResult,
     Limits,
     RtspAccess,
     apply_result,
@@ -58,6 +61,7 @@ from .probe import (
 _LOGGER = logging.getLogger(__name__)
 
 _SEMAPHORE: HassKey[asyncio.Semaphore] = HassKey(DOMAIN)
+_SNAPSHOT_SEMAPHORE: HassKey[asyncio.Semaphore] = HassKey(f"{DOMAIN}_snapshot")
 
 type FramePulseConfigEntry = ConfigEntry[FramePulseCoordinator]
 
@@ -98,6 +102,11 @@ def probe_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
     return hass.data.setdefault(_SEMAPHORE, asyncio.Semaphore(MAX_CONCURRENT_PROBES))
 
 
+def snapshot_semaphore(hass: HomeAssistant) -> asyncio.Semaphore:
+    """Return the snapshot semaphore shared by the whole integration."""
+    return hass.data.setdefault(_SNAPSHOT_SEMAPHORE, asyncio.Semaphore(MAX_CONCURRENT_SNAPSHOTS))
+
+
 class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
     """Polls go2rtc; a camera failure is data here, not `UpdateFailed`."""
 
@@ -127,6 +136,7 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
         # form goes to the device registry and diagnostics.
         self.stream_label: str = stream_label(self._stream)
         self._timeout: int = options.get(CONF_FRAME_TIMEOUT, DEFAULT_FRAME_TIMEOUT)
+        self._snapshot_stream: str = options.get(CONF_SNAPSHOT_STREAM, self._stream)
         self._limits = Limits(
             failures=options.get(CONF_FAILURES, DEFAULT_FAILURES),
             same_frames=options.get(CONF_SAME_FRAMES, DEFAULT_SAME_FRAMES),
@@ -242,6 +252,26 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
             if self.monitoring:
                 return
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="monitoring_off")
+
+    async def async_grab_snapshot(self, timeout: int | None = None) -> FrameResult:
+        """Take one frame of the snapshot stream; the camera state stays as it is.
+
+        The snapshot stream is usually not the monitored one, so its frame says
+        nothing about the freeze count or the failure count. Monitoring off or a
+        pending API login does not stop it: a snapshot is asked for on purpose.
+        Only the ffmpeg run takes a snapshot slot and is bounded by `timeout`, the
+        frame timeout of the entry when not given.
+        """
+        return await probe_frame(
+            self._session,
+            self._url,
+            self._snapshot_stream,
+            self._ffmpeg,
+            self._timeout if timeout is None else timeout,
+            snapshot_semaphore(self.hass),
+            access=self._access,
+            api=self._api,
+        )
 
     @callback
     def async_first_check(self) -> None:

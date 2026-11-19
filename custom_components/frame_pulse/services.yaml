@@ -1,0 +1,23 @@
+snapshot:
+  fields:
+    device_id:
+      selector:
+        device:
+          integration: frame_pulse
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: frame_pulse
+    filename:
+      required: true
+      example: "/media/snapshots/{{ now().strftime('%Y%m%d_%H%M%S') }}.jpg"
+      selector:
+        text:
+    timeout:
+      selector:
+        number:
+          min: 5
+          max: 60
+          step: 1
+          mode: box
+          unit_of_measurement: s
