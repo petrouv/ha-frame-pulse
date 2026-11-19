@@ -33,6 +33,7 @@ from custom_components.frame_pulse.probe import (
     apply_result,
     classify_grab,
     disabled_state,
+    ffmpeg_args,
     go2rtc_info,
     grab_frame,
     is_valid_jpeg,
@@ -250,6 +251,9 @@ import os, sys, time
 mode = os.environ["FAKE_FFMPEG"]
 with open(os.environ["FAKE_FFMPEG_PID"], "w") as file:
     file.write(str(os.getpid()))
+if args_file := os.environ.get("FAKE_FFMPEG_ARGS"):
+    with open(args_file, "w") as file:
+        file.write("\\n".join(sys.argv[1:]))
 if mode == "frame":
     sys.stdout.buffer.write(bytes.fromhex(os.environ["FAKE_FFMPEG_FRAME"]))
 elif mode == "error":
@@ -288,6 +292,29 @@ def process_gone(pid: int) -> bool:
 
 async def test_grab_frame_returns_the_frame(fake_ffmpeg):
     assert await grab_frame(fake_ffmpeg("frame"), "rtsp://h/x", 10) == Grab(0, jpeg(), "")
+
+
+def test_ffmpeg_args_leave_the_quality_to_ffmpeg_by_default():
+    assert "-q:v" not in ffmpeg_args("rtsp://h/x")
+
+
+def test_ffmpeg_args_with_a_quality():
+    args = ffmpeg_args("rtsp://h/x", 5)
+    at = args.index("mjpeg")
+    assert args[at - 1 : at + 4] == ["-c:v", "mjpeg", "-q:v", "5", "-f"]
+
+
+@pytest.mark.parametrize(("quality", "expected"), [(None, []), (3, ["-q:v", "3"])])
+async def test_grab_frame_passes_the_quality_to_ffmpeg(
+    fake_ffmpeg, tmp_path, monkeypatch, quality, expected
+):
+    args_file = tmp_path / "args"
+    monkeypatch.setenv("FAKE_FFMPEG_ARGS", str(args_file))
+    assert await grab_frame(fake_ffmpeg("frame"), "rtsp://h/x", 10, quality) == Grab(0, jpeg(), "")
+    args = args_file.read_text().split("\n")
+    assert args == ffmpeg_args("rtsp://h/x", quality)
+    at = args.index("mjpeg") + 1
+    assert args[at : at + len(expected)] == expected
 
 
 async def test_grab_frame_keeps_the_last_error_line(fake_ffmpeg):
@@ -494,12 +521,20 @@ def fake_grab(monkeypatch):
     class Fake:
         outcome = Grab(0, jpeg())
 
-        async def __call__(self, binary, url, timeout):
+        async def __call__(self, binary, url, timeout, quality=None):
+            self.quality = quality
             return self.outcome
 
     fake = Fake()
     monkeypatch.setattr(probe, "grab_frame", fake)
     return fake
+
+
+@pytest.mark.parametrize("quality", [None, 7])
+async def test_probe_frame_passes_the_quality(aioclient_mock, session, fake_grab, quality):
+    aioclient_mock.get(API_URL, json=API_INFO)
+    await probe_frame(session, GO2RTC, STREAM, "ffmpeg", 5, quality=quality)
+    assert fake_grab.quality == quality
 
 
 async def test_probe_frame_with_a_wrong_api_login_is_probe_error(aioclient_mock, session):
@@ -534,7 +569,7 @@ async def test_probe_frame_login_lost_after_a_failed_frame(aioclient_mock, sessi
     aioclient_mock.get(API_URL, json=API_INFO)
     api = ApiAccess(username="viewer", password="hunter2")
 
-    async def grab(binary, url, timeout):
+    async def grab(binary, url, timeout, quality=None):
         aioclient_mock.clear_requests()
         aioclient_mock.get(API_URL, status=401)
         return Grab(0, b"")
@@ -591,7 +626,7 @@ async def test_api_login_is_not_in_the_frame_address(aioclient_mock, session, mo
     aioclient_mock.get(API_URL, json=API_INFO)
     urls = []
 
-    async def grab(binary, url, timeout):
+    async def grab(binary, url, timeout, quality=None):
         urls.append(url)
         return Grab(0, jpeg())
 

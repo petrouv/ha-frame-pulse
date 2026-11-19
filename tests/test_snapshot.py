@@ -141,6 +141,22 @@ async def test_timeout_of_the_call(hass, loaded, ffmpeg, folder):
     assert ffmpeg.timeouts == [7]
 
 
+async def test_best_quality_by_default_and_none_for_checks(hass, loaded, ffmpeg, folder):
+    """A check leaves the quality to ffmpeg; a snapshot fixes it at 2 unless told otherwise."""
+    assert ffmpeg.qualities
+    assert set(ffmpeg.qualities) == {None}
+    ffmpeg.qualities.clear()
+    await snapshot(hass, loaded, filename=str(folder / "shot.jpg"))
+    assert ffmpeg.qualities == [2]
+
+
+@pytest.mark.parametrize("quality", [2, "7", 31])
+async def test_quality_of_the_call(hass, loaded, ffmpeg, folder, quality):
+    ffmpeg.qualities.clear()
+    await snapshot(hass, loaded, filename=str(folder / "shot.jpg"), quality=quality)
+    assert ffmpeg.qualities == [int(quality)]
+
+
 async def test_filename_template_and_missing_folder(hass, loaded, folder):
     response = await snapshot(hass, loaded, filename=str(folder) + "/{{ 'day' }}/{{ 1 + 1 }}.jpg")
     assert response["path"] == str(folder / "day" / "2.jpg")
@@ -371,6 +387,9 @@ async def test_camera_not_loaded(hass, loaded, ffmpeg, folder):
         {"config_entry_id": "a", "device_id": "b"},
         {"config_entry_id": "a", "timeout": 4},
         {"config_entry_id": "a", "timeout": 61},
+        {"config_entry_id": "a", "quality": 1},
+        {"config_entry_id": "a", "quality": 32},
+        {"config_entry_id": "a", "quality": "best"},
     ],
 )
 async def test_invalid_calls(hass, loaded, folder, data):

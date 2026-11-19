@@ -294,17 +294,33 @@ saved RTSP port and login and the go2rtc API login.
 | `device_id` or `config_entry_id` | one of them | The camera |
 | `filename` | yes | Absolute path of the file, a template allowed, as in `camera.snapshot`. The folder must be in `allowlist_external_dirs` or be a media folder (`/media` in a container or Home Assistant OS); it is created if missing. An existing file is replaced |
 | `timeout` | no | How long ffmpeg may wait for the frame, 5–60 s; the frame timeout of the camera options by default |
+| `quality` | no | JPEG quality, the ffmpeg `-q:v` number: 2 (best) to 31, 2 by default |
 
 The file is written only when a valid JPEG arrives, and it appears whole or not at all: the frame goes to a hidden
 temporary file in the same folder (`.frame_pulse-<random>.tmp`), which is renamed over the target or removed. Media
 does not list hidden files. A temporary file left by a write cut short (Home Assistant killed mid-write) is removed by the
 next snapshot to that folder once it is a minute old. The action
-responds with the path and the size in bytes, `{"path": "/media/snapshots/20261120_081500.jpg", "size": 133120}`.
+responds with the path and the size in bytes, `{"path": "/media/snapshots/20261120_081500.jpg", "size": 364326}`.
 Without a valid frame it fails with the status and the reason, as in the log line of a check, for example
 `No snapshot of Driveway: frame_timeout (no frame in 10 s)`; a wrong camera, a relative path or a folder that is not
 allowed, or a path that is a folder, fails before any frame is taken. The timeout bounds only the ffmpeg run, like the
 frame timeout of a check: a free snapshot slot may be waited for first, and the go2rtc API is asked before the run and,
 after a failed frame, once more (up to 5 s each), so a failing call can take longer than the timeout.
+
+`quality` is passed to ffmpeg as `-q:v` and written into the JPEG quantization tables, one number for the whole frame,
+lower is better. The action accepts 2–31: ffmpeg itself clips lower numbers to 2, so 1 would give the same file. Without a fixed number, as in a check, ffmpeg's
+rate control would pick anything from 2 to 25 from the picture alone, so a snapshot always passes one. One 1080p
+keyframe of an HEVC camera (about 150 KB as sent by the camera), compared with the same frame decoded without loss:
+
+| `quality` | Size | PSNR | SSIM |
+|---|---|---|---|
+| 2 | 364 KB | 46.4 dB | 0.990 |
+| 3 | 281 KB | 43.9 dB | 0.984 |
+| 5 | 201 KB | 40.9 dB | 0.973 |
+| 10 | 124 KB | 36.8 dB | 0.949 |
+
+The encoding takes about 0.1 s at any quality; most of a snapshot is waiting for the keyframe. For an archive keep 2;
+for a picture in a notification 5–10 is enough. The frame keeps the 4:2:0 color of the camera stream.
 
 A snapshot is not a check: it changes no entity, counts towards neither threshold and runs while monitoring is off or
 while Home Assistant waits for the go2rtc API login. A refused API login fails the snapshot, but only a check asks for
@@ -324,6 +340,7 @@ actions:
       device_id: 0123456789abcdef0123456789abcdef  # the Frame Pulse device of the camera
       filename: /media/{{ snap }}
       timeout: 10
+      quality: 5  # a notification picture; leave out for the best quality
     response_variable: shot
   - event: driveway_snapshot_saved
     event_data:

@@ -42,6 +42,7 @@ from .const import (
     DEFAULT_FRAME_TIMEOUT,
     DEFAULT_SAME_FRAMES,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_SNAPSHOT_QUALITY,
     DOMAIN,
     MAX_CONCURRENT_PROBES,
     MAX_CONCURRENT_SNAPSHOTS,
@@ -253,14 +254,17 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
                 return
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="monitoring_off")
 
-    async def async_grab_snapshot(self, timeout: int | None = None) -> FrameResult:
+    async def async_grab_snapshot(
+        self, timeout: int | None = None, quality: int = DEFAULT_SNAPSHOT_QUALITY
+    ) -> FrameResult:
         """Take one frame of the snapshot stream; the camera state stays as it is.
 
         The snapshot stream is usually not the monitored one, so its frame says
         nothing about the freeze count or the failure count. Monitoring off or a
         pending API login does not stop it: a snapshot is asked for on purpose.
         Only the ffmpeg run takes a snapshot slot and is bounded by `timeout`, the
-        frame timeout of the entry when not given.
+        frame timeout of the entry when not given. `quality` is the ffmpeg
+        `-q:v` number of the JPEG.
         """
         return await probe_frame(
             self._session,
@@ -271,6 +275,7 @@ class FramePulseCoordinator(DataUpdateCoordinator[CameraState]):
             snapshot_semaphore(self.hass),
             access=self._access,
             api=self._api,
+            quality=quality,
         )
 
     @callback

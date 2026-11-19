@@ -26,10 +26,14 @@ from .const import (
     ATTR_CONFIG_ENTRY_ID,
     ATTR_DEVICE_ID,
     ATTR_FILENAME,
+    ATTR_QUALITY,
     ATTR_TIMEOUT,
+    DEFAULT_SNAPSHOT_QUALITY,
     DOMAIN,
     MAX_FRAME_TIMEOUT,
+    MAX_SNAPSHOT_QUALITY,
     MIN_FRAME_TIMEOUT,
+    MIN_SNAPSHOT_QUALITY,
     SERVICE_SNAPSHOT,
 )
 from .coordinator import FramePulseConfigEntry
@@ -49,6 +53,9 @@ SNAPSHOT_SCHEMA = vol.All(
             vol.Required(ATTR_FILENAME): cv.template,
             vol.Optional(ATTR_TIMEOUT): vol.All(
                 vol.Coerce(int), vol.Range(min=MIN_FRAME_TIMEOUT, max=MAX_FRAME_TIMEOUT)
+            ),
+            vol.Optional(ATTR_QUALITY, default=DEFAULT_SNAPSHOT_QUALITY): vol.All(
+                vol.Coerce(int), vol.Range(min=MIN_SNAPSHOT_QUALITY, max=MAX_SNAPSHOT_QUALITY)
             ),
         }
     ),
@@ -182,7 +189,9 @@ async def _async_snapshot(hass: HomeAssistant, call: ServiceCall) -> dict[str, A
             translation_placeholders={"path": path},
         )
 
-    result = await coordinator.async_grab_snapshot(call.data.get(ATTR_TIMEOUT))
+    result = await coordinator.async_grab_snapshot(
+        call.data.get(ATTR_TIMEOUT), call.data[ATTR_QUALITY]
+    )
     if result.auth_failed:
         raise HomeAssistantError(translation_domain=DOMAIN, translation_key="api_auth_failed")
     if result.status is not Status.OK:

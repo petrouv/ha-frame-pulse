@@ -437,8 +437,11 @@ class Grab:
     error: str = ""
 
 
-def ffmpeg_args(url: str) -> list[str]:
+def ffmpeg_args(url: str, quality: int | None = None) -> list[str]:
     """Return ffmpeg arguments that save the first keyframe of a stream as JPEG.
+
+    `quality` is the `-q:v` number. A check leaves it out: its frame is only
+    hashed, and ffmpeg's own choice is enough for that.
 
     Without the probe limits ffmpeg spends about 3 s analyzing the stream; with
     them a frame takes about as long as go2rtc's own snapshot.
@@ -463,13 +466,14 @@ def ffmpeg_args(url: str) -> list[str]:
         "-an",
         "-c:v",
         "mjpeg",
+        *([] if quality is None else ["-q:v", str(quality)]),
         "-f",
         "image2pipe",
         "-",
     ]
 
 
-async def grab_frame(binary: str, url: str, timeout: float) -> Grab:
+async def grab_frame(binary: str, url: str, timeout: float, quality: int | None = None) -> Grab:
     """Run ffmpeg once and kill it when the timeout runs out or the check is cancelled.
 
     Killing the process closes its RTSP session, so go2rtc drops the consumer
@@ -480,7 +484,7 @@ async def grab_frame(binary: str, url: str, timeout: float) -> Grab:
     """
     process = await asyncio.create_subprocess_exec(
         binary,
-        *ffmpeg_args(url),
+        *ffmpeg_args(url, quality),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -550,6 +554,7 @@ async def probe_frame(
     *,
     access: RtspAccess = NO_ACCESS,
     api: ApiAccess = NO_API,
+    quality: int | None = None,
 ) -> FrameResult:
     """Fetch one frame through go2rtc and tell a dead camera from a broken check.
 
@@ -560,7 +565,7 @@ async def probe_frame(
     RTSP port is also tried, so a port that drops connections silently is
     `probe_error` too. Every API request carries the API login, `access` is
     the RTSP one; when go2rtc refuses the API login, the result says so in
-    `auth_failed`.
+    `auth_failed`. `quality` is the JPEG quality of the frame (see `ffmpeg_args`).
     """
     try:
         info = await go2rtc_info(session, base_url, api=api)
@@ -577,7 +582,7 @@ async def probe_frame(
     async with limit or nullcontext():
         started = time.monotonic()
         try:
-            grab = await grab_frame(binary, url, timeout)
+            grab = await grab_frame(binary, url, timeout, quality)
         except OSError as err:
             detail = f"ffmpeg cannot start: {err.strerror or type(err).__name__}"
             return FrameResult(Status.PROBE_ERROR, detail=detail)

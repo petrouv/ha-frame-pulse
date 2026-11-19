@@ -243,6 +243,10 @@
         "timeout": {
           "name": "Timeout",
           "description": "How long ffmpeg may wait for the frame, from 5 to 60 seconds. The go2rtc API requests around it are not counted. Empty: the frame timeout of the camera options."
+        },
+        "quality": {
+          "name": "JPEG quality",
+          "description": "The ffmpeg -q:v number, from 2 (best) to 31; 2 by default. On one 1080p test frame 2 gave about 360 KB, 3 about 280 KB, 5 about 200 KB, 10 about 125 KB; a busy or noisy picture comes out larger. ffmpeg goes no lower than 2."
         }
       }
     }

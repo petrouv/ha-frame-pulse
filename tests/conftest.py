@@ -45,6 +45,7 @@ class Ffmpeg:
         hook: Awaited inside every run, to hold a run or count parallel ones.
         urls: RTSP addresses of the runs, in order.
         timeouts: Frame timeouts of the runs, in order.
+        qualities: JPEG qualities of the runs, in order: `None` for ffmpeg's own choice.
         port_problem: What the port try returns: `None` when the port opens.
         port_tries: RTSP addresses whose port was tried.
     """
@@ -54,12 +55,16 @@ class Ffmpeg:
         self.hook: Callable[[], Awaitable[None]] | None = None
         self.urls: list[str] = []
         self.timeouts: list[float] = []
+        self.qualities: list[int | None] = []
         self.port_problem: str | None = None
         self.port_tries: list[str] = []
 
-    async def __call__(self, binary: str, url: str, timeout: float) -> Grab:
+    async def __call__(
+        self, binary: str, url: str, timeout: float, quality: int | None = None
+    ) -> Grab:
         self.urls.append(url)
         self.timeouts.append(timeout)
+        self.qualities.append(quality)
         if self.hook is not None:
             await self.hook()
         if isinstance(self.outcome, OSError):

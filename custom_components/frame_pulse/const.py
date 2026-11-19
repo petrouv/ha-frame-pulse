@@ -51,3 +51,12 @@ ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_DEVICE_ID = "device_id"
 ATTR_FILENAME = "filename"
 ATTR_TIMEOUT = "timeout"
+ATTR_QUALITY = "quality"
+
+# JPEG quality of a snapshot: the ffmpeg `-q:v` number, lower is better. ffmpeg writes
+# it into the JPEG quantization tables (the MPEG-1 intra matrix times q/8) and clips
+# it to its default qmin of 2, so 1 would give the same file as 2. Without a fixed
+# number its rate control picks anything from 2 to 25 from the picture alone.
+MIN_SNAPSHOT_QUALITY = 2
+MAX_SNAPSHOT_QUALITY = 31
+DEFAULT_SNAPSHOT_QUALITY = 2

@@ -21,3 +21,11 @@ snapshot:
           step: 1
           mode: box
           unit_of_measurement: s
+    quality:
+      default: 2
+      selector:
+        number:
+          min: 2
+          max: 31
+          step: 1
+          mode: box
