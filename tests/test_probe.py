@@ -249,8 +249,6 @@ async def test_rtsp_port_problem_wording(monkeypatch, error, problem):
 FAKE_FFMPEG = """\
 import os, sys, time
 mode = os.environ["FAKE_FFMPEG"]
-with open(os.environ["FAKE_FFMPEG_PID"], "w") as file:
-    file.write(str(os.getpid()))
 if args_file := os.environ.get("FAKE_FFMPEG_ARGS"):
     with open(args_file, "w") as file:
         file.write("\\n".join(sys.argv[1:]))
@@ -266,19 +264,32 @@ else:
 
 @pytest.fixture
 def fake_ffmpeg(tmp_path, monkeypatch):
-    """A real process in place of ffmpeg; it records its PID to check that it is gone."""
+    """A real process in place of ffmpeg; its PID is kept to check that it is gone.
+
+    The PID is taken from the process object as it starts, not written by the
+    process itself: a run killed before the interpreter got that far (a slow
+    start on a busy machine) would otherwise leave no PID to check.
+    """
     script = tmp_path / "ffmpeg"
     script.write_text(f"#!{sys.executable}\n{FAKE_FFMPEG}")
     script.chmod(0o755)
-    pid_file = tmp_path / "pid"
-    monkeypatch.setenv("FAKE_FFMPEG_PID", str(pid_file))
     monkeypatch.setenv("FAKE_FFMPEG_FRAME", jpeg().hex())
+    started: list[asyncio.subprocess.Process] = []
+    create = asyncio.create_subprocess_exec
+
+    async def create_and_keep(*args, **kwargs):
+        process = await create(*args, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_and_keep)
 
     def run(mode: str):
         monkeypatch.setenv("FAKE_FFMPEG", mode)
         return str(script)
 
-    run.pid = lambda: int(pid_file.read_text())
+    run.started = started
+    run.pid = lambda: started[-1].pid
     return run
 
 
@@ -327,9 +338,9 @@ async def test_grab_frame_kills_ffmpeg_on_timeout(fake_ffmpeg):
     assert process_gone(fake_ffmpeg.pid())
 
 
-async def test_grab_frame_kills_ffmpeg_on_cancel(fake_ffmpeg, tmp_path):
+async def test_grab_frame_kills_ffmpeg_on_cancel(fake_ffmpeg):
     task = asyncio.create_task(grab_frame(fake_ffmpeg("hang"), "rtsp://h/x", 30))
-    while not (tmp_path / "pid").exists():
+    while not fake_ffmpeg.started:
         await asyncio.sleep(0.05)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
